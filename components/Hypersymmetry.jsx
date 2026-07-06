@@ -404,10 +404,13 @@ export default function Hypersymmetry({ initialItems, email, username }) {
   const inboxFields = unsorted.map((x) => x.id);
 
   return (
-    <div className="min-h-screen text-stone-200" style={{ background: "#383838", fontFamily: "ui-sans-serif, system-ui, sans-serif" }} onClick={() => repeatMenu && setRepeatMenu(null)}>
+    <div className="min-h-screen text-stone-200 font-sans" style={{ background: "#000" }} onClick={() => repeatMenu && setRepeatMenu(null)}>
       <div className="max-w-5xl mx-auto px-4 py-5">
         <header className="flex items-center justify-between mb-5">
-          <h1 className="text-lg font-semibold tracking-tight" style={{ fontFamily: "ui-serif, Georgia, serif" }}>hypersymmetry</h1>
+          <div className="flex items-baseline gap-2">
+            <h1 className="font-mono font-bold text-lg tracking-tight text-white">hypersymmetry</h1>
+            <span className="text-[9px] font-mono uppercase tracking-widest text-stone-500 border border-stone-700 rounded-full px-2 py-0.5">alpha</span>
+          </div>
           <div className="flex items-center gap-1.5">
             <NavBtn id="home" icon={Home} label="Home" />
             <NavBtn id="inbox" icon={Inbox} label="Inbox" />

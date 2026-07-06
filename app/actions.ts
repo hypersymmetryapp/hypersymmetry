@@ -17,5 +17,5 @@ export async function saveBoard(items: unknown[]) {
 export async function signOut() {
   const supabase = await createClient()
   await supabase.auth.signOut()
-  redirect('/login')
+  redirect('/')
 }

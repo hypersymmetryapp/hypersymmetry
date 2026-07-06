@@ -22,46 +22,52 @@ export default function LoginPage() {
       setError(error.message)
       setLoading(false)
     } else {
-      router.push('/')
+      router.push('/app')
       router.refresh()
     }
   }
 
   return (
-    <div className="flex-1 flex items-center justify-center p-4" style={{ background: '#383838' }}>
+    <div className="flex-1 flex flex-col items-center justify-center p-4" style={{ background: '#000' }}>
       <div className="w-full max-w-sm">
-        <h1 className="text-2xl mb-8 text-center text-stone-100" style={{ fontFamily: 'ui-serif, Georgia, serif' }}>
+        <h1 className="font-mono font-bold text-3xl text-white mb-10 text-center tracking-tight">
           hypersymmetry
         </h1>
-        <form onSubmit={handleSubmit} className="space-y-3">
+        <form onSubmit={handleSubmit} className="space-y-3 font-sans" autoComplete="on">
           <input
             type="email"
+            name="email"
+            id="email"
+            autoComplete="email"
             placeholder="Email"
             value={email}
             onChange={e => setEmail(e.target.value)}
             required
-            className="w-full px-3 py-2 rounded-md text-sm bg-white outline-none border border-stone-300 focus:border-stone-400"
+            className="w-full px-3 py-2 rounded-md text-sm bg-white outline-none border border-stone-700 focus:border-stone-400"
           />
           <input
             type="password"
+            name="password"
+            id="password"
+            autoComplete="current-password"
             placeholder="Password"
             value={password}
             onChange={e => setPassword(e.target.value)}
             required
-            className="w-full px-3 py-2 rounded-md text-sm bg-white outline-none border border-stone-300 focus:border-stone-400"
+            className="w-full px-3 py-2 rounded-md text-sm bg-white outline-none border border-stone-700 focus:border-stone-400"
           />
           {error && <p className="text-red-400 text-sm">{error}</p>}
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2 rounded-md text-sm font-medium text-white transition-colors disabled:opacity-50 bg-teal-600 hover:bg-teal-500"
+            className="w-full py-2 rounded-md text-sm font-medium text-black transition-colors disabled:opacity-50 bg-white hover:bg-stone-200"
           >
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
-        <p className="mt-6 text-center text-sm text-stone-400">
+        <p className="mt-6 text-center text-sm text-stone-500 font-sans">
           No account?{' '}
-          <Link href="/signup" className="text-stone-200 hover:text-white transition-colors">
+          <Link href="/signup" className="text-stone-300 hover:text-white transition-colors">
             Sign up
           </Link>
         </p>
