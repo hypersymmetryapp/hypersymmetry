@@ -1,7 +1,10 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
 import { redirect } from 'next/navigation'
+
+const HEX_RE = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/
 
 type ClientItem = {
   id: string
@@ -141,6 +144,71 @@ export async function listBoardMembers(boardId: string) {
     role: m.role,
     username: usernameById.get(m.user_id) ?? '(unknown)',
   }))
+}
+
+export async function updateTheme(bgColor: string, panelColor: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!HEX_RE.test(bgColor) || !HEX_RE.test(panelColor)) {
+    return { ok: false, error: 'Colors must be hex codes like #000000 or #fff.' }
+  }
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const { error } = await supabase
+    .from('profiles')
+    .update({ bg_color: bgColor, panel_color: panelColor })
+    .eq('id', user.id)
+  if (error) throw error
+
+  return { ok: true }
+}
+
+export async function requestPasswordReset(origin: string) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user?.email) throw new Error('Not authenticated')
+
+  const { error } = await supabase.auth.resetPasswordForEmail(user.email, {
+    redirectTo: `${origin}/auth/reset-password`,
+  })
+  if (error) throw error
+}
+
+// Deletes every item on every board the current user OWNS. Boards the user
+// merely collaborates on (owned by someone else) are untouched, and the
+// boards/memberships themselves survive -- only their contents are cleared.
+export async function wipeAccount() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const { data: ownedBoards, error: boardsError } = await supabase
+    .from('boards')
+    .select('id')
+    .eq('owner_id', user.id)
+  if (boardsError) throw boardsError
+
+  const boardIds = (ownedBoards ?? []).map((b) => b.id)
+  if (!boardIds.length) return
+
+  const { error } = await supabase.from('items').delete().in('board_id', boardIds)
+  if (error) throw error
+}
+
+// Permanently deletes the account. Cascades (via existing FKs) through
+// profiles, board_members, and any boards this user owns -- including their
+// items and, for shared boards, other members' access to them.
+export async function deleteAccount() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const admin = createAdminClient()
+  const { error } = await admin.auth.admin.deleteUser(user.id)
+  if (error) throw error
+
+  await supabase.auth.signOut()
+  redirect('/')
 }
 
 export async function signOut() {

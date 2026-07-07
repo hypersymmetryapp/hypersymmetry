@@ -14,7 +14,7 @@ export default async function Home({
 
   let [boards, profile] = await Promise.all([
     listMyBoards(),
-    supabase.from("profiles").select("username").eq("id", user.id).maybeSingle().then((r) => r.data),
+    supabase.from("profiles").select("username, bg_color, panel_color").eq("id", user.id).maybeSingle().then((r) => r.data),
   ]);
 
   // A logged-in user with no board would otherwise be redirected to /login,
@@ -56,6 +56,8 @@ export default async function Home({
       initialItems={initialItems}
       email={user.email ?? ""}
       username={profile?.username ?? ""}
+      bgColor={profile?.bg_color ?? "#000000"}
+      panelColor={profile?.panel_color ?? "#ffffff"}
       boardId={activeBoard.id}
       boards={boards}
       members={members}

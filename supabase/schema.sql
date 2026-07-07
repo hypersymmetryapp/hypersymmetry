@@ -131,3 +131,9 @@ create trigger on_auth_user_created
 
 -- Realtime: let clients subscribe to live changes on a board's items
 alter publication supabase_realtime add table public.items;
+
+-- Per-user theme prefs. Safe to be user-writable via the existing
+-- "update own profile" policy -- purely cosmetic, unlike an admin flag.
+alter table public.profiles
+  add column bg_color text not null default '#000000',
+  add column panel_color text not null default '#ffffff';

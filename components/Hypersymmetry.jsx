@@ -7,9 +7,9 @@ import {
   Home, Network, Inbox, Star, Plus, Trash2, Check, ChevronRight,
   ListChecks, GitBranch, RotateCcw, Search, Sun, CornerDownRight, X,
   ZoomIn, ZoomOut, Crosshair, Repeat, Calendar, Flag, Clock, Bell, StickyNote, HelpCircle, Archive, Eye, AlertTriangle,
-  LogOut, UserPlus,
+  LogOut, UserPlus, Palette, KeyRound, Eraser, UserX, ChevronDown,
 } from "lucide-react";
-import { syncItems, signOut, inviteToBoard } from "@/app/actions";
+import { syncItems, signOut, inviteToBoard, updateTheme, requestPasswordReset, wipeAccount, deleteAccount } from "@/app/actions";
 import { createClient } from "@/lib/supabase/client";
 
 const uid = () => crypto.randomUUID();
@@ -72,13 +72,24 @@ function parseQuick(text) {
   }
   return { name: keep.join(" "), due, time, priority, tags, assignees, desc };
 }
-export default function Hypersymmetry({ initialItems, email, username, boardId, boards, members }) {
+export default function Hypersymmetry({ initialItems, email, username, bgColor, panelColor, boardId, boards, members }) {
   const router = useRouter();
   const [items, setItems] = useState(initialItems || []);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteName, setInviteName] = useState("");
   const [inviteMsg, setInviteMsg] = useState("");
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountView, setAccountView] = useState("menu");
+  const [bg, setBg] = useState(bgColor || "#000000");
+  const [panel, setPanel] = useState(panelColor || "#ffffff");
+  const [bgDraft, setBgDraft] = useState(bgColor || "#000000");
+  const [panelDraft, setPanelDraft] = useState(panelColor || "#ffffff");
+  const [themeMsg, setThemeMsg] = useState("");
+  const [pwMsg, setPwMsg] = useState("");
+  const [wipeMsg, setWipeMsg] = useState("");
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const [view, setView] = useState("home");
   const [homeMode, setHomeMode] = useState("today");
   const [groupBy, setGroupBy] = useState("none");
@@ -280,6 +291,38 @@ export default function Hypersymmetry({ initialItems, email, username, boardId, 
       })
       .catch(() => setInviteMsg("Couldn't invite that user."));
   };
+  const closeAccountMenu = () => { setAccountOpen(false); setAccountView("menu"); setThemeMsg(""); setPwMsg(""); setWipeMsg(""); setDeleteConfirmText(""); };
+  const openCustomize = () => { setBgDraft(bg); setPanelDraft(panel); setThemeMsg(""); setAccountView("customize"); };
+  const previewTheme = (nextBg, nextPanel) => { setBgDraft(nextBg); setPanelDraft(nextPanel); setBg(nextBg); setPanel(nextPanel); };
+  const cancelCustomize = () => { setBg(bgColor || "#000000"); setPanel(panelColor || "#ffffff"); setAccountView("menu"); };
+  const saveTheme = () => {
+    updateTheme(bgDraft, panelDraft)
+      .then((res) => { if (res.ok) { setThemeMsg("Saved."); } else setThemeMsg(res.error); })
+      .catch(() => setThemeMsg("Couldn't save theme."));
+  };
+  const doRequestPasswordReset = () => {
+    requestPasswordReset(window.location.origin)
+      .then(() => setPwMsg("Check your email for a reset link."))
+      .catch(() => setPwMsg("Couldn't send reset email."));
+  };
+  const doWipeAccount = () => {
+    wipeAccount()
+      .then(() => {
+        setWipeMsg("Done — your boards are cleared.");
+        // router.refresh() alone doesn't remount this client component (same
+        // class of stale-state issue as switching boards), and an optimistic
+        // local setItems([]) would be wrong if the user is currently viewing
+        // a board they don't own (wipe only touches boards they DO own) — so
+        // force a full reload rather than guess.
+        setTimeout(() => window.location.reload(), 700);
+      })
+      .catch(() => setWipeMsg("Couldn't wipe your data."));
+  };
+  const doDeleteAccount = () => {
+    if (deleteConfirmText !== "DELETE") return;
+    setDeleting(true);
+    deleteAccount().catch(() => setDeleting(false));
+  };
 
   const q = query.trim().toLowerCase();
   const matches = (n) => { if (!q) return true; if ((n.name || n.text || "").toLowerCase().includes(q)) return true; if (n.type === "idea") return goalsUnder(n.id).some(matches); if (n.type === "goal") return goalsUnder(n.id).some(matches) || tasksUnder(n.id).some((t) => (t.name || "").toLowerCase().includes(q)); return false; };
@@ -458,7 +501,8 @@ export default function Hypersymmetry({ initialItems, email, username, boardId, 
   const inboxFields = unsorted.map((x) => x.id);
 
   return (
-    <div className="min-h-screen text-stone-200 font-sans" style={{ background: "#000" }} onClick={() => { repeatMenu && setRepeatMenu(null); switcherOpen && setSwitcherOpen(false); inviteOpen && setInviteOpen(false); }}>
+    <div className="hs-root min-h-screen text-stone-200 font-sans" style={{ background: bg }} onClick={() => { repeatMenu && setRepeatMenu(null); switcherOpen && setSwitcherOpen(false); inviteOpen && setInviteOpen(false); accountOpen && closeAccountMenu(); }}>
+      <style>{`.hs-root .bg-white { background-color: ${panel} !important; }`}</style>
       <div className="max-w-5xl mx-auto px-4 py-5">
         <header className="flex items-center justify-between mb-5">
           <div className="flex items-baseline gap-2">
@@ -520,8 +564,89 @@ export default function Hypersymmetry({ initialItems, email, username, boardId, 
                 )}
               </span>
             )}
-            <span className="text-xs text-stone-400 ml-2">{username ? `@${username}` : email}</span>
-            <button title="sign out" onClick={() => signOut()} className="text-stone-400 hover:text-stone-100 ml-1"><LogOut size={16} /></button>
+            <span className="relative">
+              <button
+                onClick={(e) => { e.stopPropagation(); setAccountOpen((v) => !v); if (!accountOpen) setAccountView("menu"); }}
+                className="flex items-center gap-1 text-xs text-stone-400 hover:text-stone-100 ml-2"
+              >
+                {username ? `@${username}` : email}
+                <ChevronDown size={12} />
+              </button>
+              {accountOpen && (
+                <div onClick={(e) => e.stopPropagation()} className="absolute right-0 top-7 z-30 bg-white border border-stone-200 rounded-lg shadow-lg p-3 w-64 text-sm text-stone-700">
+                  {accountView === "menu" && (
+                    <>
+                      <div className="text-xs text-stone-400 mb-2 truncate px-2">{email}</div>
+                      <button onClick={openCustomize} className="flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-stone-100"><Palette size={14} />Customize</button>
+                      <button onClick={doRequestPasswordReset} className="flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-stone-100"><KeyRound size={14} />Reset password</button>
+                      {pwMsg && <p className="text-xs text-stone-500 px-2 pb-1">{pwMsg}</p>}
+                      <button onClick={() => { setView("help"); closeAccountMenu(); }} className="flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-stone-100"><HelpCircle size={14} />Help</button>
+                      <div className="my-1 border-t border-stone-100" />
+                      <button onClick={() => setAccountView("wipe")} className="flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-stone-100 text-amber-600"><Eraser size={14} />Wipe account clean</button>
+                      <button onClick={() => setAccountView("delete")} className="flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-stone-100 text-red-600"><UserX size={14} />Delete account</button>
+                      <div className="my-1 border-t border-stone-100" />
+                      <button onClick={() => signOut()} className="flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-stone-100"><LogOut size={14} />Sign out</button>
+                    </>
+                  )}
+                  {accountView === "customize" && (
+                    <>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs uppercase tracking-wide text-stone-400">customize</span>
+                        <button onClick={() => setAccountView("menu")} className="text-xs text-stone-400 hover:text-stone-700">back</button>
+                      </div>
+                      <label className="block text-xs text-stone-500 mb-1">background color</label>
+                      <input
+                        value={bgDraft}
+                        onChange={(e) => previewTheme(e.target.value, panelDraft)}
+                        placeholder="#000000"
+                        className="w-full text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300 mb-2 font-mono"
+                      />
+                      <label className="block text-xs text-stone-500 mb-1">textbox color</label>
+                      <input
+                        value={panelDraft}
+                        onChange={(e) => previewTheme(bgDraft, e.target.value)}
+                        placeholder="#ffffff"
+                        className="w-full text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300 mb-2 font-mono"
+                      />
+                      <div className="flex gap-1.5">
+                        <button onClick={saveTheme} className="text-xs px-2 py-1 rounded bg-teal-600 text-white hover:bg-teal-500">save</button>
+                        <button onClick={cancelCustomize} className="text-xs px-2 py-1 rounded text-stone-500 hover:bg-stone-100">cancel</button>
+                      </div>
+                      {themeMsg && <p className="text-xs text-stone-500 mt-1.5">{themeMsg}</p>}
+                    </>
+                  )}
+                  {accountView === "wipe" && (
+                    <>
+                      <p className="text-sm text-stone-700 mb-2">This deletes every item on every board you own. This can&apos;t be undone.</p>
+                      <div className="flex gap-1.5">
+                        <button onClick={doWipeAccount} className="text-xs px-2 py-1 rounded bg-red-500 text-white hover:bg-red-600">wipe it</button>
+                        <button onClick={() => setAccountView("menu")} className="text-xs px-2 py-1 rounded text-stone-500 hover:bg-stone-100">cancel</button>
+                      </div>
+                      {wipeMsg && <p className="text-xs text-stone-500 mt-1.5">{wipeMsg}</p>}
+                    </>
+                  )}
+                  {accountView === "delete" && (
+                    <>
+                      <p className="text-sm text-stone-700 mb-2">This permanently deletes your account, boards you own, and everyone&apos;s access to them. Type <span className="font-mono font-semibold">DELETE</span> to confirm.</p>
+                      <input
+                        value={deleteConfirmText}
+                        onChange={(e) => setDeleteConfirmText(e.target.value)}
+                        placeholder="DELETE"
+                        className="w-full text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-red-300 mb-2 font-mono"
+                      />
+                      <div className="flex gap-1.5">
+                        <button
+                          disabled={deleteConfirmText !== "DELETE" || deleting}
+                          onClick={doDeleteAccount}
+                          className="text-xs px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >{deleting ? "deleting…" : "delete my account"}</button>
+                        <button onClick={() => { setAccountView("menu"); setDeleteConfirmText(""); }} className="text-xs px-2 py-1 rounded text-stone-500 hover:bg-stone-100">cancel</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </span>
           </div>
         </header>
 

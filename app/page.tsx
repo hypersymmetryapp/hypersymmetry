@@ -12,7 +12,7 @@ export default async function Landing() {
       <h1 className="font-mono font-bold text-4xl sm:text-5xl text-white tracking-tight">
         hypersymmetry
       </h1>
-      <p className="font-mono text-stone-400 mt-3 text-sm sm:text-base">making data easier</p>
+      <p className="font-mono text-stone-400 mt-3 text-sm sm:text-base">intelligent organization</p>
 
       <span className="mt-6 text-[10px] font-mono uppercase tracking-widest text-stone-500 border border-stone-700 rounded-full px-3 py-1">
         alpha build — more coming soon
