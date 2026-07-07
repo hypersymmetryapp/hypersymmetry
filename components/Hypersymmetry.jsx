@@ -270,6 +270,16 @@ export default function Hypersymmetry({ initialItems, email, username, boardId, 
   const backspaceEmpty = (id, fields) => { const i = fields.indexOf(id); const prev = i > 0 ? fields[i - 1] : null; remove(id); if (prev) setFocus(prev); };
   const toggleDesc = (id) => setDescOpen((o) => ({ ...o, [id]: !o[id] }));
   const flash = (m) => { setWarn(m); clearTimeout(warnTimer.current); warnTimer.current = setTimeout(() => setWarn(""), 2500); };
+  const doInvite = () => {
+    const name = inviteName.trim();
+    if (!name) return;
+    inviteToBoard(boardId, name)
+      .then((res) => {
+        if (res.ok) { setInviteName(""); setInviteMsg("Invited!"); router.refresh(); }
+        else setInviteMsg(res.error);
+      })
+      .catch(() => setInviteMsg("Couldn't invite that user."));
+  };
 
   const q = query.trim().toLowerCase();
   const matches = (n) => { if (!q) return true; if ((n.name || n.text || "").toLowerCase().includes(q)) return true; if (n.type === "idea") return goalsUnder(n.id).some(matches); if (n.type === "goal") return goalsUnder(n.id).some(matches) || tasksUnder(n.id).some((t) => (t.name || "").toLowerCase().includes(q)); return false; };
@@ -496,12 +506,12 @@ export default function Hypersymmetry({ initialItems, email, username, boardId, 
                       <input
                         value={inviteName}
                         onChange={(e) => setInviteName(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") { inviteToBoard(boardId, inviteName.trim()).then(() => { setInviteName(""); setInviteMsg("Invited!"); router.refresh(); }).catch((err) => setInviteMsg(err.message || "Couldn't invite that user.")); } }}
+                        onKeyDown={(e) => { if (e.key === "Enter") doInvite(); }}
                         placeholder="username to invite"
                         className="flex-1 text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300"
                       />
                       <button
-                        onClick={() => { const name = inviteName.trim(); if (!name) return; inviteToBoard(boardId, name).then(() => { setInviteName(""); setInviteMsg("Invited!"); router.refresh(); }).catch((err) => setInviteMsg(err.message || "Couldn't invite that user.")); }}
+                        onClick={doInvite}
                         className="text-xs px-2 py-1 rounded bg-teal-600 text-white hover:bg-teal-500"
                       >invite</button>
                     </div>

@@ -74,7 +74,7 @@ export default function SignupPage() {
             value={email}
             onChange={e => setEmail(e.target.value)}
             required
-            className="w-full px-3 py-2 rounded-md text-sm bg-white outline-none border border-stone-700"
+            className="w-full px-3 py-2 rounded-md text-sm bg-white text-stone-900 placeholder-stone-400 outline-none border border-stone-700"
           />
           <input
             type="text"
@@ -85,7 +85,7 @@ export default function SignupPage() {
             value={username}
             onChange={e => setUsername(e.target.value)}
             required
-            className="w-full px-3 py-2 rounded-md text-sm bg-white outline-none border border-stone-700"
+            className="w-full px-3 py-2 rounded-md text-sm bg-white text-stone-900 placeholder-stone-400 outline-none border border-stone-700"
           />
           <input
             type="password"
@@ -97,7 +97,7 @@ export default function SignupPage() {
             onChange={e => setPassword(e.target.value)}
             required
             minLength={8}
-            className="w-full px-3 py-2 rounded-md text-sm bg-white outline-none border border-stone-700"
+            className="w-full px-3 py-2 rounded-md text-sm bg-white text-stone-900 placeholder-stone-400 outline-none border border-stone-700"
           />
           {error && <p className="text-red-400 text-sm">{error}</p>}
           <button

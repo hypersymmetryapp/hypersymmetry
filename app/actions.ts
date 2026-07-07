@@ -34,7 +34,7 @@ export async function syncItems(boardId: string, upserts: ClientItem[], deleteId
   }
 }
 
-export async function inviteToBoard(boardId: string, username: string) {
+export async function inviteToBoard(boardId: string, username: string): Promise<{ ok: true } | { ok: false; error: string }> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) throw new Error('Not authenticated')
@@ -45,15 +45,17 @@ export async function inviteToBoard(boardId: string, username: string) {
     .eq('username', username)
     .maybeSingle()
   if (lookupError) throw lookupError
-  if (!profile) throw new Error(`No user found with username "${username}"`)
+  if (!profile) return { ok: false, error: `No user found with username "${username}"` }
 
   const { error } = await supabase
     .from('board_members')
     .insert({ board_id: boardId, user_id: profile.id, role: 'editor' })
   if (error) {
-    if (/duplicate key/i.test(error.message)) throw new Error('That person is already a member of this board.')
+    if (/duplicate key/i.test(error.message)) return { ok: false, error: 'That person is already a member of this board.' }
     throw error
   }
+
+  return { ok: true }
 }
 
 export async function listMyBoards() {
