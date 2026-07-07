@@ -1,15 +1,18 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   Home, Network, Inbox, Star, Plus, Trash2, Check, ChevronRight,
   ListChecks, GitBranch, RotateCcw, Search, Sun, CornerDownRight, X,
   ZoomIn, ZoomOut, Crosshair, Repeat, Calendar, Flag, Clock, Bell, StickyNote, HelpCircle, Archive, Eye, AlertTriangle,
-  LogOut,
+  LogOut, UserPlus,
 } from "lucide-react";
-import { saveBoard, signOut } from "@/app/actions";
+import { syncItems, signOut, inviteToBoard } from "@/app/actions";
+import { createClient } from "@/lib/supabase/client";
 
-const uid = () => Math.random().toString(36).slice(2, 10);
+const uid = () => crypto.randomUUID();
 const NW = 168, NH = 50, XG = 232, YG = 78;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -69,8 +72,13 @@ function parseQuick(text) {
   }
   return { name: keep.join(" "), due, time, priority, tags, assignees, desc };
 }
-export default function Hypersymmetry({ initialItems, email, username }) {
+export default function Hypersymmetry({ initialItems, email, username, boardId, boards, members }) {
+  const router = useRouter();
   const [items, setItems] = useState(initialItems || []);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [inviteName, setInviteName] = useState("");
+  const [inviteMsg, setInviteMsg] = useState("");
   const [view, setView] = useState("home");
   const [homeMode, setHomeMode] = useState("today");
   const [groupBy, setGroupBy] = useState("none");
@@ -98,6 +106,7 @@ export default function Hypersymmetry({ initialItems, email, username }) {
   const ideaRef = useRef(null);
   const warnTimer = useRef();
   const saveTimer = useRef();
+  const lastSynced = useRef(initialItems || []);
   const selRef = useRef(sel);
   const viewRef = useRef(view);
   const past = useRef([]);
@@ -113,9 +122,44 @@ export default function Hypersymmetry({ initialItems, email, username }) {
   useEffect(() => {
     if (!loaded.current) return;
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => { saveBoard(items).catch(() => {}); }, 600);
+    saveTimer.current = setTimeout(() => {
+      const prevById = new Map(lastSynced.current.map((i) => [i.id, i]));
+      const nextIds = new Set(items.map((i) => i.id));
+      const upserts = items.filter((i) => JSON.stringify(prevById.get(i.id)) !== JSON.stringify(i));
+      const deleteIds = lastSynced.current.filter((i) => !nextIds.has(i.id)).map((i) => i.id);
+      if (upserts.length || deleteIds.length) {
+        syncItems(boardId, upserts, deleteIds)
+          .then(() => { lastSynced.current = items; })
+          .catch(() => {});
+      } else {
+        lastSynced.current = items;
+      }
+    }, 600);
     return () => clearTimeout(saveTimer.current);
-  }, [items]);
+  }, [items, boardId]);
+  useEffect(() => {
+    const supabase = createClient();
+    const channel = supabase
+      .channel(`board:${boardId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "items", filter: `board_id=eq.${boardId}` }, (payload) => {
+        setItems((prev) => {
+          if (payload.eventType === "DELETE") {
+            const deadId = payload.old.id;
+            lastSynced.current = lastSynced.current.filter((i) => i.id !== deadId);
+            return prev.filter((i) => i.id !== deadId);
+          }
+          const row = payload.new;
+          const incoming = { id: row.id, type: row.type, parentId: row.parent_id, ...(row.fields || {}) };
+          const idx = prev.findIndex((i) => i.id === incoming.id);
+          lastSynced.current = idx === -1
+            ? [...lastSynced.current, incoming]
+            : lastSynced.current.map((i) => (i.id === incoming.id ? incoming : i));
+          return idx === -1 ? [...prev, incoming] : prev.map((i, ix) => (ix === idx ? incoming : i));
+        });
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [boardId]);
   useEffect(() => { if (focus && inputs.current[focus]) { const el = inputs.current[focus]; el.focus(); try { const v = el.value.length; el.setSelectionRange(v, v); } catch {} setFocus(null); } }, [focus, items]);
 
   useEffect(() => {
@@ -404,12 +448,28 @@ export default function Hypersymmetry({ initialItems, email, username }) {
   const inboxFields = unsorted.map((x) => x.id);
 
   return (
-    <div className="min-h-screen text-stone-200 font-sans" style={{ background: "#000" }} onClick={() => repeatMenu && setRepeatMenu(null)}>
+    <div className="min-h-screen text-stone-200 font-sans" style={{ background: "#000" }} onClick={() => { repeatMenu && setRepeatMenu(null); switcherOpen && setSwitcherOpen(false); inviteOpen && setInviteOpen(false); }}>
       <div className="max-w-5xl mx-auto px-4 py-5">
         <header className="flex items-center justify-between mb-5">
           <div className="flex items-baseline gap-2">
             <h1 className="font-mono font-bold text-lg tracking-tight text-white">hypersymmetry</h1>
             <span className="text-[9px] font-mono uppercase tracking-widest text-stone-500 border border-stone-700 rounded-full px-2 py-0.5">alpha</span>
+            {boards && boards.length > 1 && (
+              <span className="relative">
+                <button onClick={(e) => { e.stopPropagation(); setSwitcherOpen((v) => !v); }} className="text-xs text-stone-400 hover:text-stone-100 border border-stone-700 rounded-full px-2 py-0.5 ml-1">
+                  {boards.find((b) => b.id === boardId)?.isOwn ? "My board" : `${boards.find((b) => b.id === boardId)?.ownerUsername}'s board`}
+                </button>
+                {switcherOpen && (
+                  <div onClick={(e) => e.stopPropagation()} className="absolute left-0 top-7 z-30 bg-white border border-stone-200 rounded-lg shadow-lg p-1 w-48 text-sm text-stone-700">
+                    {boards.map((b) => (
+                      <Link key={b.id} href={`/app?board=${b.id}`} onClick={() => setSwitcherOpen(false)} className={`block px-2 py-1 rounded hover:bg-stone-100 ${b.id === boardId ? "text-teal-600 font-medium" : ""}`}>
+                        {b.isOwn ? "My board" : `${b.ownerUsername}'s board`}
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1.5">
             <NavBtn id="home" icon={Home} label="Home" />
@@ -418,6 +478,38 @@ export default function Hypersymmetry({ initialItems, email, username }) {
             <NavBtn id="help" icon={HelpCircle} label="Help" />
             {confirmReset ? <span className="flex items-center gap-1 text-xs"><button onClick={() => { setItems([]); setSel(null); setConfirmReset(false); }} className="px-2 py-1 rounded bg-red-500 text-white">erase all</button><button onClick={() => setConfirmReset(false)} className="px-2 py-1 rounded text-stone-200 hover:bg-stone-700">cancel</button></span>
               : <button title="reset everything" onClick={() => setConfirmReset(true)} className="text-stone-400 hover:text-stone-100 ml-1"><RotateCcw size={16} /></button>}
+            {boards && boards.find((b) => b.id === boardId)?.isOwn && (
+              <span className="relative">
+                <button title="invite" onClick={(e) => { e.stopPropagation(); setInviteMsg(""); setInviteOpen((v) => !v); }} className="text-stone-400 hover:text-stone-100 ml-1"><UserPlus size={16} /></button>
+                {inviteOpen && (
+                  <div onClick={(e) => e.stopPropagation()} className="absolute right-0 top-7 z-30 bg-white border border-stone-200 rounded-lg shadow-lg p-3 w-64 text-sm text-stone-700">
+                    <div className="text-xs uppercase tracking-wide text-stone-400 mb-1.5">members</div>
+                    <div className="space-y-1 mb-2 max-h-32 overflow-auto">
+                      {(members || []).map((m) => (
+                        <div key={m.userId} className="flex items-center justify-between text-xs text-stone-600">
+                          <span>@{m.username}</span>
+                          <span className="text-stone-400">{m.role}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-1">
+                      <input
+                        value={inviteName}
+                        onChange={(e) => setInviteName(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") { inviteToBoard(boardId, inviteName.trim()).then(() => { setInviteName(""); setInviteMsg("Invited!"); router.refresh(); }).catch((err) => setInviteMsg(err.message || "Couldn't invite that user.")); } }}
+                        placeholder="username to invite"
+                        className="flex-1 text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300"
+                      />
+                      <button
+                        onClick={() => { const name = inviteName.trim(); if (!name) return; inviteToBoard(boardId, name).then(() => { setInviteName(""); setInviteMsg("Invited!"); router.refresh(); }).catch((err) => setInviteMsg(err.message || "Couldn't invite that user.")); }}
+                        className="text-xs px-2 py-1 rounded bg-teal-600 text-white hover:bg-teal-500"
+                      >invite</button>
+                    </div>
+                    {inviteMsg && <p className="text-xs text-stone-500 mt-1.5">{inviteMsg}</p>}
+                  </div>
+                )}
+              </span>
+            )}
             <span className="text-xs text-stone-400 ml-2">{username ? `@${username}` : email}</span>
             <button title="sign out" onClick={() => signOut()} className="text-stone-400 hover:text-stone-100 ml-1"><LogOut size={16} /></button>
           </div>
