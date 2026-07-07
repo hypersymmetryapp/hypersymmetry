@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { listMyBoards, listBoardMembers } from "@/app/actions";
+import { listMyBoards, listBoardMembers, ensureUserBoard } from "@/app/actions";
 import Hypersymmetry from "@/components/Hypersymmetry";
 
 export default async function Home({
@@ -12,10 +12,19 @@ export default async function Home({
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [boards, profile] = await Promise.all([
+  let [boards, profile] = await Promise.all([
     listMyBoards(),
     supabase.from("profiles").select("username").eq("id", user.id).maybeSingle().then((r) => r.data),
   ]);
+
+  // A logged-in user with no board would otherwise be redirected to /login,
+  // which the middleware bounces straight back to /app — an infinite loop.
+  // This happens for accounts created before the multiplayer schema existed
+  // (their boards were dropped in the reset). Self-heal by creating a board.
+  if (boards.length === 0) {
+    await ensureUserBoard();
+    boards = await listMyBoards();
+  }
 
   const requestedBoard = (await searchParams).board;
   const requestedId = Array.isArray(requestedBoard) ? requestedBoard[0] : requestedBoard;

@@ -10,6 +10,36 @@ type ClientItem = {
   [key: string]: unknown
 }
 
+// Create a personal board for the current user if they have none. Idempotent:
+// safe to call on every load. Needed for accounts created before the
+// multiplayer schema (whose boards were dropped) and as a general safety net
+// so a logged-in user is never left board-less (which would loop /app<->/login).
+export async function ensureUserBoard() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const { data: existing } = await supabase
+    .from('board_members')
+    .select('board_id')
+    .eq('user_id', user.id)
+    .limit(1)
+    .maybeSingle()
+  if (existing) return
+
+  const { data: board, error: boardError } = await supabase
+    .from('boards')
+    .insert({ owner_id: user.id, name: 'My board' })
+    .select('id')
+    .single()
+  if (boardError) throw boardError
+
+  const { error: memberError } = await supabase
+    .from('board_members')
+    .insert({ board_id: board.id, user_id: user.id, role: 'owner' })
+  if (memberError) throw memberError
+}
+
 export async function syncItems(boardId: string, upserts: ClientItem[], deleteIds: string[]) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()

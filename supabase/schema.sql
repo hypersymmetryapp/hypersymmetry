@@ -78,6 +78,9 @@ $$;
 create policy "Members can view their boards"
   on public.boards for select using (public.is_board_member(id));
 
+create policy "Users can create their own boards"
+  on public.boards for insert with check (owner_id = auth.uid());
+
 create policy "Members can view board membership"
   on public.board_members for select using (public.is_board_member(board_id));
 
