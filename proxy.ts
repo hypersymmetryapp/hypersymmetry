@@ -27,12 +27,22 @@ export async function proxy(request: NextRequest) {
   const isAuthPage = pathname.startsWith('/login') || pathname.startsWith('/signup') || pathname.startsWith('/auth')
   const isPublicPage = pathname === '/' || isAuthPage
 
+  // A redirect response must carry over any auth cookies Supabase refreshed
+  // during getUser(). Returning a bare NextResponse.redirect() drops the
+  // rotated session cookies, which invalidates the refresh token and causes
+  // an /app <-> /login redirect loop once the access token expires.
+  const redirectTo = (path: string) => {
+    const res = NextResponse.redirect(new URL(path, request.url))
+    supabaseResponse.cookies.getAll().forEach((cookie) => res.cookies.set(cookie))
+    return res
+  }
+
   if (!user && !isPublicPage) {
-    return NextResponse.redirect(new URL('/login', request.url))
+    return redirectTo('/login')
   }
 
   if (user && isAuthPage) {
-    return NextResponse.redirect(new URL('/app', request.url))
+    return redirectTo('/app')
   }
 
   return supabaseResponse
