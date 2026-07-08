@@ -25,6 +25,7 @@ const PRI = { 1: "High", 2: "Medium", 3: "Low" };
 const PRI_COLOR = { 1: "text-red-500", 2: "text-amber-500", 3: "text-sky-500" };
 const REPEAT_OPTS = [["none","Does not repeat"],["daily","Daily"],["weekdays","Weekdays"],["weekly","Weekly"],["monthly","Monthly"]];
 const repeatLabel = (t) => ({ daily:"daily", weekdays:"weekdays", weekly:"weekly", monthly:"monthly", everyN:`every ${t.repeatN||2}d` }[t.repeat] || "");
+const autoResize = (el) => { if (!el) return; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; };
 
 function nextDue(due, repeat, n, today) {
   const base = due && due >= today ? due : today;
@@ -273,7 +274,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const submitQuick = () => { const r = parseQuick(quick); const name = r.name || quick.trim(); if (!name) return; const id = uid(); apply((p) => [...p, { id, type: "task", parentId: null, name, today: true, done: false, due: r.due, time: r.time, priority: r.priority, tags: r.tags, assignees: r.assignees, desc: r.desc }]); setQuick(""); if (r.desc) setDescOpen((o) => ({ ...o, [id]: true })); setFocus(id); };
   const setRepeat = (t, v) => { update(t.id, { repeat: v, due: v !== "none" && !t.due ? todayStr : t.due }); setRepeatMenu(null); };
 
-  const addTaskAfter = (t) => { const id = uid(); const loose = t.parentId == null; apply((p) => { const idx = p.findIndex((i) => i.id === t.id); let j = idx + 1; while (j < p.length && p[j].type === "subtask" && p[j].parentId === t.id) j++; const nt = { id, type: "task", parentId: t.parentId ?? null, name: "", today: loose ? homeMode === "today" : false, done: false, priority: 0, tags: loose ? (t.tags || []) : [] }; return [...p.slice(0, j), nt, ...p.slice(j)]; }); setFocus(id); };
+  const addTaskAfter = (t, patch) => { const id = uid(); const loose = t.parentId == null; apply((p) => { const base = patch ? p.map((i) => (i.id === t.id ? { ...i, ...patch } : i)) : p; const idx = base.findIndex((i) => i.id === t.id); let j = idx + 1; while (j < base.length && base[j].type === "subtask" && base[j].parentId === t.id) j++; const nt = { id, type: "task", parentId: t.parentId ?? null, name: "", today: loose ? homeMode === "today" : false, done: false, priority: 0, tags: loose ? (t.tags || []) : [] }; return [...base.slice(0, j), nt, ...base.slice(j)]; }); setFocus(id); };
   const addSubAfter = (s) => { const id = uid(); apply((p) => { const idx = p.findIndex((i) => i.id === s.id); return [...p.slice(0, idx + 1), { id, type: "subtask", parentId: s.parentId, name: "", done: false }, ...p.slice(idx + 1)]; }); setFocus(id); };
   const indentTask = (t, tops) => { if (subsUnder(t.id).length) return; const i = tops.indexOf(t.id); if (i <= 0) return; const prevId = tops[i - 1]; apply((p) => { const without = p.filter((x) => x.id !== t.id); const conv = { ...t, type: "subtask", parentId: prevId }; const idx = without.findIndex((x) => x.id === prevId); let j = idx + 1; while (j < without.length && without[j].type === "subtask" && without[j].parentId === prevId) j++; return [...without.slice(0, j), conv, ...without.slice(j)]; }); setFocus(t.id); };
   const outdentSub = (s) => { apply((p) => { const parent = p.find((i) => i.id === s.parentId); if (!parent) return p; const without = p.filter((x) => x.id !== s.id); const conv = { id: s.id, type: "task", parentId: null, name: s.name, today: homeMode === "today", done: s.done, priority: 0, tags: [] }; const idx = without.findIndex((x) => x.id === parent.id); let j = idx + 1; while (j < without.length && without[j].type === "subtask" && without[j].parentId === parent.id) j++; return [...without.slice(0, j), conv, ...without.slice(j)]; }); setFocus(s.id); };
@@ -342,7 +343,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const iconBtn = "text-stone-400 hover:text-stone-700 transition-colors";
   const chip = "inline-flex items-center gap-1 text-xs uppercase tracking-wide px-1.5 py-0.5 rounded font-medium";
   const stop = { onPointerDown: (e) => e.stopPropagation(), onClick: (e) => e.stopPropagation() };
-  const reg = (id) => (el) => { if (el) inputs.current[id] = el; else delete inputs.current[id]; };
+  const reg = (id) => (el) => { if (el) { inputs.current[id] = el; if (el.tagName === "TEXTAREA") autoResize(el); } else delete inputs.current[id]; };
   const noteArea = "w-full text-sm bg-stone-50 rounded-lg p-2 outline-none focus:ring-1 focus:ring-stone-300 text-stone-700 resize-none";
   const tagPills = (it) => (<>
     {(it.tags || []).map((tg) => <button key={"t" + tg} onClick={() => update(it.id, { tags: (it.tags || []).filter((x) => x !== tg) })} className="shrink-0 text-xs px-1.5 py-0.5 rounded bg-stone-100 text-stone-500 hover:bg-stone-200">#{tg}</button>)}
@@ -373,7 +374,21 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     const lv = t.priority || 0;
     const onTaskKey = (e) => {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!subs.length) checkTask(t); return; }
-      if (e.key === "Enter") { e.preventDefault(); addTaskAfter(t); return; }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const r = parseQuick(t.name);
+        const patch = (r.due || r.time || r.priority || r.tags.length || r.assignees.length || r.desc) ? {
+          name: r.name || t.name,
+          due: r.due || t.due,
+          time: r.time || t.time,
+          priority: r.priority || t.priority,
+          tags: Array.from(new Set([...(t.tags || []), ...r.tags])),
+          assignees: Array.from(new Set([...(t.assignees || []), ...r.assignees])),
+          desc: r.desc || t.desc,
+        } : null;
+        addTaskAfter(t, patch);
+        return;
+      }
       if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); indentTask(t, tops); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); nav(-1, t.id, fields); return; }
       if (e.key === "ArrowDown") { e.preventDefault(); nav(1, t.id, fields); return; }
@@ -383,7 +398,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     const onSubKey = (e, s) => {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); toggleSub(s); return; }
       if (e.key === "Enter") { e.preventDefault(); addSubAfter(s); return; }
-      if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); outdentSub(s); return; }
+      if (e.key === "Tab") { e.preventDefault(); outdentSub(s); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); nav(-1, s.id, fields); return; }
       if (e.key === "ArrowDown") { e.preventDefault(); nav(1, s.id, fields); return; }
       if (e.key === "Escape") { e.target.blur(); return; }
@@ -396,18 +411,18 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
             : <button onClick={() => checkTask(t)} className="shrink-0"><span className={`flex items-center justify-center w-5 h-5 rounded-md border ${done ? "bg-teal-500 border-teal-500" : over ? "border-red-300" : "border-stone-300"}`}>{done && <Check size={13} className="text-white" />}</span></button>}
           <button title="priority" onClick={() => update(t.id, { priority: (lv + 1) % 4 })} className={`shrink-0 ${lv ? PRI_COLOR[lv] : "text-stone-300 hover:text-stone-500"}`}><Flag size={13} fill={lv ? "currentColor" : "none"} /></button>
           <div className="min-w-0 flex-1">
-            <input ref={reg(t.id)} className={`${inp} w-full text-sm ${done ? "line-through text-stone-400" : over ? "text-red-600" : "text-stone-800"}`} value={t.name} placeholder="untitled task" onChange={(e) => edit(t.id, { name: e.target.value })} onKeyDown={onTaskKey} />
+            <textarea ref={reg(t.id)} rows={1} className={`${inp} w-full text-sm resize-none overflow-hidden block ${done ? "line-through text-stone-400" : over ? "text-red-600" : "text-stone-800"}`} value={t.name} placeholder="untitled task" onChange={(e) => { edit(t.id, { name: e.target.value }); autoResize(e.target); }} onKeyDown={onTaskKey} />
             {showPath && path.length > 0 && <div className="text-xs text-stone-400 truncate px-1.5">↑ {path.join(" › ")}</div>}
           </div>
           {tagPills(t)}
           <button title="notes" onClick={() => toggleDesc(t.id)} className={`shrink-0 ${t.desc ? "text-stone-600" : "opacity-0 group-hover:opacity-100 text-stone-400 hover:text-stone-700"}`}><StickyNote size={13} /></button>
-          <span className="relative inline-flex items-center shrink-0 text-xs">
+          <span className="relative inline-flex items-center shrink-0 text-xs cursor-pointer" onClick={(e) => { try { e.currentTarget.querySelector("input")?.showPicker(); } catch {} }}>
             {t.due ? <span className={over ? "text-red-500 font-medium" : "text-stone-500"}>{fmtLabel(t.due)}</span> : <Calendar size={14} className="text-stone-300 group-hover:text-stone-400" />}
-            <input type="date" value={t.due || ""} onChange={(e) => update(t.id, { due: e.target.value })} className="absolute inset-0 opacity-0 cursor-pointer" />
+            <input type="date" tabIndex={-1} value={t.due || ""} onChange={(e) => update(t.id, { due: e.target.value })} className="absolute inset-0 opacity-0 pointer-events-none" />
           </span>
-          {t.due && <span className="relative inline-flex items-center shrink-0 text-xs">
+          {t.due && <span className="relative inline-flex items-center shrink-0 text-xs cursor-pointer" onClick={(e) => { try { e.currentTarget.querySelector("input")?.showPicker(); } catch {} }}>
             {t.time ? <span className={over ? "text-red-500 font-medium" : "text-stone-500"}>{fmtTime(t.time)}</span> : <Clock size={13} className="text-stone-300 group-hover:text-stone-400" />}
-            <input type="time" value={t.time || ""} onChange={(e) => update(t.id, { time: e.target.value })} className="absolute inset-0 opacity-0 cursor-pointer" />
+            <input type="time" tabIndex={-1} value={t.time || ""} onChange={(e) => update(t.id, { time: e.target.value })} className="absolute inset-0 opacity-0 pointer-events-none" />
           </span>}
           <span className="relative shrink-0">
             <button title="repeat" onClick={() => setRepeatMenu(repeatMenu === t.id ? null : t.id)} className={`flex items-center gap-0.5 ${t.repeat && t.repeat !== "none" ? "text-violet-500" : "text-stone-300 hover:text-stone-500"}`}><Repeat size={14} />{t.repeat && t.repeat !== "none" && <span className="text-xs">{repeatLabel(t)}</span>}</button>
@@ -432,7 +447,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
             <div className="flex items-center gap-2 pl-9 py-0.5 group">
               <CornerDownRight size={12} className="text-stone-300 shrink-0" />
               <button onClick={() => toggleSub(s)} className="shrink-0"><span className={`flex items-center justify-center w-3.5 h-3.5 rounded border ${s.done ? "bg-teal-500 border-teal-500" : "border-stone-300"}`}>{s.done && <Check size={10} className="text-white" />}</span></button>
-              <input ref={reg(s.id)} className={`${inp} flex-1 text-sm min-w-0 ${s.done ? "line-through text-stone-400" : ""}`} value={s.name} placeholder="subtask…" onChange={(e) => edit(s.id, { name: e.target.value })} onKeyDown={(e) => onSubKey(e, s)} />
+              <textarea ref={reg(s.id)} rows={1} className={`${inp} flex-1 text-sm min-w-0 resize-none overflow-hidden block ${s.done ? "line-through text-stone-400" : ""}`} value={s.name} placeholder="subtask…" onChange={(e) => { edit(s.id, { name: e.target.value }); autoResize(e.target); }} onKeyDown={(e) => onSubKey(e, s)} />
               <button title="notes" onClick={() => toggleDesc(s.id)} className={`shrink-0 ${s.desc ? "text-stone-600" : "opacity-0 group-hover:opacity-100 text-stone-400 hover:text-stone-700"}`}><StickyNote size={12} /></button>
               <button onClick={() => remove(s.id)} className={`${iconBtn} opacity-0 group-hover:opacity-100`}><Trash2 size={11} /></button>
             </div>
