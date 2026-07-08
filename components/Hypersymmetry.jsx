@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import {
   syncItems, signOut, inviteToBoard, updateTheme, requestPasswordReset, wipeAccount, deleteAccount,
-  resolveAssignee, confirmAssignee, createProject, renameProject,
+  resolveAssignee, confirmAssignee, createProject, renameProject, leaveProject, deleteProject,
 } from "@/app/actions";
 import { createClient } from "@/lib/supabase/client";
 
@@ -76,7 +76,7 @@ function parseQuick(text) {
   }
   return { name: keep.join(" "), due, time, priority, tags, assignees, desc };
 }
-export default function Hypersymmetry({ initialItems, email, username, bgColor, panelColor, boardId, boards, members, assignedToMe }) {
+export default function Hypersymmetry({ initialItems, email, username, bgColor, panelColor, boardId, boards, members, assignedToMe, myProjects, friends, initialView }) {
   const router = useRouter();
   const [items, setItems] = useState(initialItems || []);
   const [rollup, setRollup] = useState(assignedToMe || []);
@@ -85,7 +85,9 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const [newProjectName, setNewProjectName] = useState("");
   const [renamingProject, setRenamingProject] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
-  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(null);
+  const [deleteProjectConfirm, setDeleteProjectConfirm] = useState(null);
+  const [projectMsg, setProjectMsg] = useState("");
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteName, setInviteName] = useState("");
   const [inviteMsg, setInviteMsg] = useState("");
@@ -100,7 +102,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const [wipeMsg, setWipeMsg] = useState("");
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [deleting, setDeleting] = useState(false);
-  const [view, setView] = useState("home");
+  const [view, setView] = useState(initialView || "home");
   const [homeMode, setHomeMode] = useState("today");
   const [groupBy, setGroupBy] = useState("none");
   const [capture, setCapture] = useState("");
@@ -465,7 +467,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     if (!name) return;
     createProject(name)
       .then((res) => {
-        if (res.ok) { setNewProjectOpen(false); setNewProjectName(""); setSwitcherOpen(false); router.push(`/app?board=${res.id}`); router.refresh(); }
+        if (res.ok) { setNewProjectOpen(false); setNewProjectName(""); router.push(`/app?board=${res.id}&view=plan`); }
         else flash(res.error);
       })
       .catch(() => flash("Couldn't create project."));
@@ -478,6 +480,19 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     renameProject(boardId, name)
       .then((res) => { if (res.ok) router.refresh(); else flash(res.error); })
       .catch(() => flash("Couldn't rename project."));
+  };
+  const doLeaveProject = (pid) => {
+    setProjectMenuOpen(null);
+    leaveProject(pid)
+      .then((res) => { if (res.ok) router.refresh(); else setProjectMsg(res.error); })
+      .catch(() => setProjectMsg("Couldn't leave that project."));
+  };
+  const doDeleteProject = (pid) => {
+    setProjectMenuOpen(null);
+    setDeleteProjectConfirm(null);
+    deleteProject(pid)
+      .then((res) => { if (res.ok) router.refresh(); else setProjectMsg(res.error); })
+      .catch(() => setProjectMsg("Couldn't delete that project."));
   };
 
   const q = query.trim().toLowerCase();
@@ -777,60 +792,13 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const inboxFields = unsorted.map((x) => x.id);
 
   return (
-    <div className="hs-root min-h-screen text-stone-200 font-sans" style={{ background: bg }} onClick={() => { repeatMenu && setRepeatMenu(null); switcherOpen && setSwitcherOpen(false); inviteOpen && setInviteOpen(false); accountOpen && closeAccountMenu(); setNewProjectOpen(false); setRenamingProject(false); }}>
+    <div className="hs-root min-h-screen text-stone-200 font-sans" style={{ background: bg }} onClick={() => { repeatMenu && setRepeatMenu(null); inviteOpen && setInviteOpen(false); accountOpen && closeAccountMenu(); setNewProjectOpen(false); setRenamingProject(false); setProjectMenuOpen(null); setDeleteProjectConfirm(null); }}>
       <style>{`.hs-root .bg-white { background-color: ${panel} !important; }`}</style>
       <div className="max-w-5xl mx-auto px-4 py-5">
         <header className="flex items-center justify-between mb-5">
           <div className="flex items-baseline gap-2">
             <h1 className="font-mono font-bold text-lg tracking-tight text-white">hypersymmetry</h1>
             <span className="text-[9px] font-mono uppercase tracking-widest text-stone-500 border border-stone-700 rounded-full px-2 py-0.5">alpha</span>
-            <span className="relative">
-              <button onClick={(e) => { e.stopPropagation(); setSwitcherOpen((v) => !v); }} className="text-xs text-stone-400 hover:text-stone-100 border border-stone-700 rounded-full px-2 py-0.5 ml-1">
-                {(boards || []).find((b) => b.id === boardId)?.name || "My board"}
-              </button>
-              {switcherOpen && (
-                <div onClick={(e) => e.stopPropagation()} className="absolute left-0 top-7 z-30 bg-white border border-stone-200 rounded-lg shadow-lg p-1 w-56 text-sm text-stone-700">
-                  {(boards || []).map((b) => (
-                    <div key={b.id} className="flex items-center gap-1">
-                      {renamingProject && b.id === boardId ? (
-                        <input
-                          autoFocus
-                          value={projectNameDraft}
-                          onChange={(e) => setProjectNameDraft(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") doRenameProject(); if (e.key === "Escape") setRenamingProject(false); }}
-                          onBlur={doRenameProject}
-                          className="flex-1 text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300"
-                        />
-                      ) : (
-                        <Link href={`/app?board=${b.id}`} onClick={() => setSwitcherOpen(false)} className={`flex-1 px-2 py-1 rounded hover:bg-stone-100 truncate ${b.id === boardId ? "text-teal-600 font-medium" : ""}`}>
-                          {b.name}{!b.isOwn && <span className="text-stone-400 font-normal"> · @{b.ownerUsername}</span>}
-                        </Link>
-                      )}
-                      {b.isOwn && b.id === boardId && !renamingProject && (
-                        <button onClick={(e) => { e.stopPropagation(); setProjectNameDraft(b.name); setRenamingProject(true); }} className="text-stone-300 hover:text-stone-600 shrink-0 px-1"><Pencil size={12} /></button>
-                      )}
-                    </div>
-                  ))}
-                  <div className="border-t border-stone-100 mt-1 pt-1">
-                    {newProjectOpen ? (
-                      <div className="flex gap-1 px-1" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          autoFocus
-                          value={newProjectName}
-                          onChange={(e) => setNewProjectName(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") doCreateProject(); if (e.key === "Escape") setNewProjectOpen(false); }}
-                          placeholder="project name"
-                          className="flex-1 text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300"
-                        />
-                        <button onClick={doCreateProject} className="text-xs px-2 py-1 rounded bg-teal-600 text-white hover:bg-teal-500">add</button>
-                      </div>
-                    ) : (
-                      <button onClick={(e) => { e.stopPropagation(); setNewProjectName(""); setNewProjectOpen(true); }} className="flex items-center gap-1 w-full text-left px-2 py-1 rounded hover:bg-stone-100 text-stone-600"><Plus size={13} />new project</button>
-                    )}
-                  </div>
-                </div>
-              )}
-            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <NavBtn id="home" icon={Home} label="Home" />
@@ -1002,7 +970,71 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
               <textarea rows={2} value={capture} onChange={(e) => setCapture(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addIdea(capture); setCapture(""); } }} placeholder="what's on your mind?  #tag or @person works too · enter to drop it" className="w-full resize-none text-sm bg-stone-50 rounded-lg p-2.5 outline-none focus:ring-1 focus:ring-stone-300 text-stone-800" />
               <div className="flex justify-end mt-2"><button onClick={() => { addIdea(capture); setCapture(""); }} className="text-sm px-3 py-1.5 rounded-lg border border-stone-300 hover:bg-stone-100 text-stone-700">drop in inbox</button></div>
             </section>
-            <section style={{ minHeight: "7rem" }} className="rounded-xl border border-dashed border-stone-600 p-4 text-stone-400 text-sm flex items-center justify-center text-center">Team space — arriving with multiplayer</section>
+            <section className="rounded-xl border border-stone-200 bg-white p-4">
+              <div className="flex items-center gap-2 mb-3"><Network size={17} className="text-violet-500" /><h2 className="font-medium text-stone-700">My projects</h2></div>
+              {newProjectOpen ? (
+                <div className="flex gap-1.5 mb-3" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    autoFocus
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") doCreateProject(); if (e.key === "Escape") setNewProjectOpen(false); }}
+                    placeholder="project name"
+                    className="flex-1 text-sm bg-stone-50 rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-stone-300"
+                  />
+                  <button onClick={doCreateProject} className="text-sm px-3 py-1.5 rounded-lg bg-teal-600 text-white hover:bg-teal-500">create</button>
+                </div>
+              ) : (
+                <button onClick={(e) => { e.stopPropagation(); setNewProjectName(""); setNewProjectOpen(true); }} className="flex items-center justify-center gap-1.5 w-full text-sm px-3 py-2 rounded-lg bg-teal-600 text-white hover:bg-teal-500 mb-3"><Plus size={15} />new project</button>
+              )}
+              {projectMsg && <p className="text-xs text-red-500 mb-2">{projectMsg}</p>}
+              {(myProjects || []).length === 0 ? (
+                <p className="text-sm text-stone-400 py-2">No shared projects yet. Create one above, or assign someone a task to bring them onto a project.</p>
+              ) : (
+                <div className="space-y-1">
+                  {(myProjects || []).map((p) => (
+                    <div key={p.id} className="relative flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-stone-50">
+                      <Link href={`/app?board=${p.id}&view=plan`} className="min-w-0 flex-1 truncate text-sm text-stone-800 hover:text-teal-600">{p.name}</Link>
+                      <span className="shrink-0 text-xs text-stone-400">{p.isOwn ? "owned by you" : `shared by @${p.ownerUsername}`}</span>
+                      <button onClick={(e) => { e.stopPropagation(); setDeleteProjectConfirm(null); setProjectMenuOpen(projectMenuOpen === p.id ? null : p.id); }} className="shrink-0 text-stone-400 hover:text-stone-700"><ChevronDown size={14} /></button>
+                      {projectMenuOpen === p.id && (
+                        <div onClick={(e) => e.stopPropagation()} className="absolute right-0 top-8 z-20 bg-white border border-stone-200 rounded-lg shadow-lg p-2 w-56 text-sm text-stone-700">
+                          <div className="text-xs uppercase tracking-wide text-stone-400 mb-1 px-1">members</div>
+                          {p.members.length === 0 ? <p className="text-xs text-stone-400 px-1 pb-1">Just you so far.</p> : (
+                            <div className="space-y-0.5 mb-1.5">{p.members.map((m) => <div key={m.userId} className="px-1 py-0.5 truncate">@{m.username}</div>)}</div>
+                          )}
+                          <div className="border-t border-stone-100 pt-1.5 mt-1">
+                            {p.isOwn ? (
+                              deleteProjectConfirm === p.id ? (
+                                <div className="flex items-center gap-1.5 px-1">
+                                  <span className="text-xs text-stone-500 flex-1">Delete for everyone?</span>
+                                  <button onClick={() => doDeleteProject(p.id)} className="text-xs px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700">yes</button>
+                                  <button onClick={() => setDeleteProjectConfirm(null)} className="text-xs px-2 py-1 rounded text-stone-500 hover:bg-stone-100">no</button>
+                                </div>
+                              ) : (
+                                <button onClick={() => setDeleteProjectConfirm(p.id)} className="flex items-center gap-1 w-full text-left px-1 py-1 rounded hover:bg-red-50 text-red-500"><Trash2 size={13} />delete project</button>
+                              )
+                            ) : (
+                              <button onClick={() => doLeaveProject(p.id)} className="flex items-center gap-1 w-full text-left px-1 py-1 rounded hover:bg-stone-100 text-stone-600"><LogOut size={13} />leave project</button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+            <section className="rounded-xl border border-stone-200 bg-white p-4">
+              <div className="flex items-center gap-2 mb-3"><UserPlus size={17} className="text-sky-500" /><h2 className="font-medium text-stone-700">My friends</h2></div>
+              {(friends || []).length === 0 ? (
+                <p className="text-sm text-stone-400 py-2">No friends yet — assigning someone a task, or joining a project, makes you friends automatically.</p>
+              ) : (
+                <div className="space-y-1 max-h-48 overflow-y-auto">
+                  {(friends || []).map((f) => <div key={f.id} className="text-sm text-stone-700 px-1 py-1 truncate">@{f.username}</div>)}
+                </div>
+              )}
+            </section>
             </div>
           </div>
         )}
@@ -1063,9 +1095,29 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
               <div className="flex items-center gap-1.5 mb-2 px-1 text-stone-200"><Network size={13} className="text-violet-400" /><span className="text-xs uppercase tracking-wide">projects</span></div>
               <div className="space-y-1 mb-4">
                 {(boards || []).map((b) => (
-                  <Link key={b.id} href={`/app?board=${b.id}`} className={`block text-sm truncate rounded-lg px-2 py-1.5 ${b.id === boardId ? "bg-white text-stone-900 font-medium" : "text-stone-300 hover:bg-stone-800"}`}>
-                    {b.name}
-                  </Link>
+                  <div key={b.id} className="flex items-center gap-1">
+                    {renamingProject && b.id === boardId ? (
+                      <input
+                        autoFocus
+                        value={projectNameDraft}
+                        onChange={(e) => setProjectNameDraft(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") doRenameProject(); if (e.key === "Escape") setRenamingProject(false); }}
+                        onBlur={doRenameProject}
+                        className="flex-1 text-sm bg-white text-stone-900 rounded-lg px-2 py-1.5 outline-none focus:ring-1 focus:ring-teal-400"
+                      />
+                    ) : (
+                      // Preserves `view` across the board switch -- without it,
+                      // switching boards remounts the component (key={boardId}
+                      // on the whole tree) and the view state resets to its
+                      // "home" default, which reads as a redirect-to-home bug.
+                      <Link href={`/app?board=${b.id}&view=plan`} className={`flex-1 text-sm truncate rounded-lg px-2 py-1.5 ${b.id === boardId ? "bg-white text-stone-900 font-medium" : "text-stone-300 hover:bg-stone-800"}`}>
+                        {b.name}
+                      </Link>
+                    )}
+                    {b.isOwn && b.id === boardId && !renamingProject && (
+                      <button onClick={(e) => { e.stopPropagation(); setProjectNameDraft(b.name); setRenamingProject(true); }} className="text-stone-500 hover:text-stone-200 shrink-0 px-1"><Pencil size={12} /></button>
+                    )}
+                  </div>
                 ))}
               </div>
               <div className="flex items-center gap-1.5 mb-2 px-1 text-stone-200"><Star size={13} className="text-amber-400" /><span className="text-xs uppercase tracking-wide">starred ideas</span></div>

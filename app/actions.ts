@@ -328,6 +328,95 @@ export async function listAssignedToMe() {
   }))
 }
 
+// Projects with more than one member -- the "team space" list. A board
+// nobody else has been invited to (including the personal default board
+// almost everyone has) isn't really a "project" in the collaborative sense,
+// so it's left out here even though it's still reachable from Plan.
+export async function listMyProjects() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const boards = await listMyBoards()
+  if (!boards.length) return []
+
+  const { data: allMembers, error } = await supabase
+    .from('board_members')
+    .select('board_id, user_id')
+    .in('board_id', boards.map((b) => b.id))
+  if (error) throw error
+
+  const membersByBoard = new Map<string, string[]>()
+  for (const m of allMembers ?? []) {
+    const arr = membersByBoard.get(m.board_id) || []
+    arr.push(m.user_id)
+    membersByBoard.set(m.board_id, arr)
+  }
+
+  const shared = boards.filter((b) => (membersByBoard.get(b.id)?.length ?? 0) > 1)
+  if (!shared.length) return []
+
+  const otherIds = Array.from(new Set(shared.flatMap((b) => membersByBoard.get(b.id) ?? []).filter((id) => id !== user.id)))
+  const { data: profiles } = otherIds.length
+    ? await supabase.from('profiles').select('id, username').in('id', otherIds)
+    : { data: [] as { id: string; username: string }[] }
+  const usernameById = new Map((profiles ?? []).map((p) => [p.id, p.username]))
+
+  return shared.map((b) => ({
+    id: b.id,
+    name: b.name,
+    isOwn: b.isOwn,
+    ownerUsername: b.ownerUsername,
+    members: (membersByBoard.get(b.id) ?? [])
+      .filter((id) => id !== user.id)
+      .map((id) => ({ userId: id, username: usernameById.get(id) ?? '(unknown)' })),
+  }))
+}
+
+export async function listFriends() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const { data: rows, error } = await supabase
+    .from('friendships')
+    .select('user_a, user_b')
+    .or(`user_a.eq.${user.id},user_b.eq.${user.id}`)
+  if (error) throw error
+
+  const friendIds = (rows ?? []).map((r) => (r.user_a === user.id ? r.user_b : r.user_a))
+  if (!friendIds.length) return []
+
+  const { data: profiles, error: profileError } = await supabase.from('profiles').select('id, username').in('id', friendIds)
+  if (profileError) throw profileError
+  return (profiles ?? [])
+    .map((p) => ({ id: p.id, username: p.username }))
+    .sort((a, b) => a.username.localeCompare(b.username))
+}
+
+export async function leaveProject(boardId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const { data: board } = await supabase.from('boards').select('owner_id').eq('id', boardId).maybeSingle()
+  if (board?.owner_id === user.id) return { ok: false, error: 'Owners delete the project instead of leaving it.' }
+
+  const { error } = await supabase.from('board_members').delete().eq('board_id', boardId).eq('user_id', user.id)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
+export async function deleteProject(boardId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const { error } = await supabase.from('boards').delete().eq('id', boardId).eq('owner_id', user.id)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
 export async function updateTheme(bgColor: string, panelColor: string): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!HEX_RE.test(bgColor) || !HEX_RE.test(panelColor)) {
     return { ok: false, error: 'Colors must be hex codes like #000000 or #fff.' }

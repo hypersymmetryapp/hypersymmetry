@@ -264,3 +264,14 @@ create policy "Users can create their own boards"
 drop policy if exists "Members can view their boards" on public.boards;
 create policy "Members can view their boards"
   on public.boards for select using (public.is_board_member(id) or owner_id = auth.uid());
+
+-- Leave/delete project. A member can remove their own board_members row
+-- ("leave"); this is a separate permissive policy from the existing
+-- "Only the owner can remove members" one, which already excludes
+-- user_id = auth.uid() -- so an owner can't leave this way and has to
+-- delete the whole project instead, via the boards policy below.
+create policy "Members can remove themselves"
+  on public.board_members for delete using (user_id = auth.uid());
+
+create policy "Owner can delete their boards"
+  on public.boards for delete using (owner_id = auth.uid());

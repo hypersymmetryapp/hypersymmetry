@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { listMyBoards, listBoardMembers, ensureUserBoard, listAssignedToMe } from "@/app/actions";
+import { listMyBoards, listBoardMembers, ensureUserBoard, listAssignedToMe, listMyProjects, listFriends } from "@/app/actions";
 import Hypersymmetry from "@/components/Hypersymmetry";
 
 export default async function Home({
@@ -26,8 +26,11 @@ export default async function Home({
     boards = await listMyBoards();
   }
 
-  const requestedBoard = (await searchParams).board;
+  const params = await searchParams;
+  const requestedBoard = params.board;
   const requestedId = Array.isArray(requestedBoard) ? requestedBoard[0] : requestedBoard;
+  const requestedView = params.view;
+  const initialView = Array.isArray(requestedView) ? requestedView[0] : requestedView;
   const activeBoard =
     boards.find((b) => b.id === requestedId) ??
     boards.find((b) => b.isOwn) ??
@@ -35,13 +38,15 @@ export default async function Home({
 
   if (!activeBoard) redirect("/login");
 
-  const [{ data: itemRows }, members, assignedToMe] = await Promise.all([
+  const [{ data: itemRows }, members, assignedToMe, myProjects, friends] = await Promise.all([
     supabase
       .from("items")
       .select("id, type, parent_id, fields")
       .eq("board_id", activeBoard.id),
     listBoardMembers(activeBoard.id),
     listAssignedToMe(),
+    listMyProjects(),
+    listFriends(),
   ]);
 
   const initialItems = (itemRows ?? []).map((row) => ({
@@ -63,6 +68,9 @@ export default async function Home({
       boards={boards}
       members={members}
       assignedToMe={assignedToMe}
+      myProjects={myProjects}
+      friends={friends}
+      initialView={initialView}
     />
   );
 }
