@@ -7,9 +7,12 @@ import {
   Home, Network, Inbox, Star, Plus, Trash2, Check, ChevronRight,
   ListChecks, GitBranch, RotateCcw, Search, Sun, CornerDownRight, X,
   ZoomIn, ZoomOut, Crosshair, Repeat, Calendar, Flag, Clock, Bell, StickyNote, HelpCircle, Archive, Eye, AlertTriangle,
-  LogOut, UserPlus, Palette, KeyRound, Eraser, UserX, ChevronDown,
+  LogOut, UserPlus, Palette, KeyRound, Eraser, UserX, ChevronDown, Pencil,
 } from "lucide-react";
-import { syncItems, signOut, inviteToBoard, updateTheme, requestPasswordReset, wipeAccount, deleteAccount } from "@/app/actions";
+import {
+  syncItems, signOut, inviteToBoard, updateTheme, requestPasswordReset, wipeAccount, deleteAccount,
+  resolveAssignee, confirmAssignee, createProject, renameProject,
+} from "@/app/actions";
 import { createClient } from "@/lib/supabase/client";
 
 const uid = () => crypto.randomUUID();
@@ -73,9 +76,15 @@ function parseQuick(text) {
   }
   return { name: keep.join(" "), due, time, priority, tags, assignees, desc };
 }
-export default function Hypersymmetry({ initialItems, email, username, bgColor, panelColor, boardId, boards, members }) {
+export default function Hypersymmetry({ initialItems, email, username, bgColor, panelColor, boardId, boards, members, assignedToMe }) {
   const router = useRouter();
   const [items, setItems] = useState(initialItems || []);
+  const [rollup, setRollup] = useState(assignedToMe || []);
+  const [mentionPopup, setMentionPopup] = useState(null);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [renamingProject, setRenamingProject] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteName, setInviteName] = useState("");
@@ -119,6 +128,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const warnTimer = useRef();
   const saveTimer = useRef();
   const lastSynced = useRef(initialItems || []);
+  const assigneeAttempts = useRef(new Map());
   const selRef = useRef(sel);
   const viewRef = useRef(view);
   const past = useRef([]);
@@ -172,6 +182,39 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [boardId]);
+  // Resolve @mention tokens against real accounts in the background, without
+  // blocking task creation. Already-attempted item+token pairs are tracked
+  // client-side for this session only, so a declined popup doesn't re-fire
+  // on every keystroke -- re-typing the same tag after a reload can prompt
+  // again, which is an acceptable rough edge for this size of feature.
+  useEffect(() => {
+    if (!loaded.current) return;
+    const resolveList = (list, itemBoardId, applyPatch, inRollup) => {
+      list.forEach((item) => {
+        if (item.type !== "task") return;
+        const tokens = item.assignees || [];
+        if (!tokens.length) return;
+        let attempted = assigneeAttempts.current.get(item.id);
+        if (!attempted) { attempted = new Set(); assigneeAttempts.current.set(item.id, attempted); }
+        tokens.forEach((token) => {
+          if (attempted.has(token)) return;
+          attempted.add(token);
+          const forBoard = typeof itemBoardId === "function" ? itemBoardId(item) : itemBoardId;
+          resolveAssignee(forBoard, token).then((res) => {
+            if (res.status === "ok") {
+              applyPatch(item.id, { assigneeIds: Array.from(new Set([...(item.assigneeIds || []), res.userId])) });
+            } else if (res.status === "not_found") {
+              flash(`@${token} does not exist.`);
+            } else {
+              setMentionPopup({ itemId: item.id, itemBoardId: forBoard, inRollup, token, ...res });
+            }
+          }).catch(() => { attempted.delete(token); });
+        });
+      });
+    };
+    resolveList(items, boardId, edit, false);
+    resolveList(rollup, (item) => item.boardId, (id, patch) => setRollup((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x))), true);
+  }, [items, rollup, boardId]);
   useEffect(() => { if (focus && inputs.current[focus]) { const el = inputs.current[focus]; el.focus(); try { const v = el.value.length; el.setSelectionRange(v, v); } catch {} setFocus(null); } }, [focus, items]);
 
   useEffect(() => {
@@ -230,7 +273,6 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const subsUnder = (tid) => all.filter((i) => i.type === "subtask" && i.parentId === tid);
   const ideas = all.filter((i) => i.type === "idea");
   const rootGoals = all.filter((i) => i.type === "goal" && i.parentId == null);
-  const allTasks = all.filter((i) => i.type === "task");
 
   const taskDone = (t) => { const s = subsUnder(t.id); return s.length ? s.every((x) => x.done) : !!t.done; };
   const taskFrac = (t) => { const s = subsUnder(t.id); return s.length ? s.filter((x) => x.done).length / s.length : t.done ? 1 : 0; };
@@ -324,6 +366,54 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     setDeleting(true);
     deleteAccount().catch(() => setDeleting(false));
   };
+  const handleMentionConfirm = (yes) => {
+    const mp = mentionPopup;
+    setMentionPopup(null);
+    if (!mp || !yes) return;
+    const input = mp.status === "needs_invite" ? { email: mp.email } : { userId: mp.userId };
+    confirmAssignee(mp.itemBoardId, window.location.origin, input)
+      .then((res) => {
+        if (res.ok) {
+          const attach = (list) => list.map((x) => (x.id === mp.itemId ? { ...x, assigneeIds: Array.from(new Set([...(x.assigneeIds || []), res.userId])) } : x));
+          if (mp.inRollup) setRollup(attach); else setItems(attach);
+          flash(`@${res.username} added to this project.`);
+          router.refresh();
+        } else {
+          flash(res.error);
+        }
+      })
+      .catch(() => flash("Couldn't complete that."));
+  };
+  const submitHomeQuick = () => {
+    const r = parseQuick(quick);
+    const name = r.name || quick.trim();
+    if (!name) return;
+    const myBoardId = (boards || []).find((b) => b.isOwn)?.id || boardId;
+    const id = uid();
+    const newTask = { id, type: "task", parentId: null, name, today: true, done: false, due: r.due, time: r.time, priority: r.priority, tags: r.tags, assignees: r.assignees, desc: r.desc };
+    setQuick("");
+    setRollup((prev) => [...prev, newTask]);
+    syncItems(myBoardId, [newTask], []).catch(() => flash("Couldn't save that task."));
+  };
+  const doCreateProject = () => {
+    const name = newProjectName.trim();
+    if (!name) return;
+    createProject(name)
+      .then((res) => {
+        if (res.ok) { setNewProjectOpen(false); setNewProjectName(""); setSwitcherOpen(false); router.push(`/app?board=${res.id}`); router.refresh(); }
+        else flash(res.error);
+      })
+      .catch(() => flash("Couldn't create project."));
+  };
+  const doRenameProject = () => {
+    const name = projectNameDraft.trim();
+    setRenamingProject(false);
+    const current = (boards || []).find((b) => b.id === boardId);
+    if (!name || name === current?.name) return;
+    renameProject(boardId, name)
+      .then((res) => { if (res.ok) router.refresh(); else flash(res.error); })
+      .catch(() => flash("Couldn't rename project."));
+  };
 
   const q = query.trim().toLowerCase();
   const matches = (n) => { if (!q) return true; if ((n.name || n.text || "").toLowerCase().includes(q)) return true; if (n.type === "idea") return goalsUnder(n.id).some(matches); if (n.type === "goal") return goalsUnder(n.id).some(matches) || tasksUnder(n.id).some((t) => (t.name || "").toLowerCase().includes(q)); return false; };
@@ -358,15 +448,16 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   );
 
   const sortTasks = (a, b) => { const dn = (taskDone(a) ? 1 : 0) - (taskDone(b) ? 1 : 0); if (dn) return dn; const pa = a.priority || 9, pb = b.priority || 9; if (pa !== pb) return pa - pb; return (a.due || "9999") < (b.due || "9999") ? -1 : 1; };
-  const visibleTasks = allTasks.filter((t) => showArchived || !t.archived);
-  const baseTasks = (homeMode === "today" ? visibleTasks.filter((t) => t.today || (t.repeat && t.repeat !== "none")) : visibleTasks);
-  let groups = [];
-  if (groupBy === "none") groups = [{ label: null, tasks: baseTasks.slice().sort(sortTasks) }];
-  else if (groupBy === "priority") groups = [1, 2, 3, 0].map((lv) => ({ label: lv ? PRI[lv] : "No priority", tasks: baseTasks.filter((t) => (t.priority || 0) === lv).sort(sortTasks) })).filter((g) => g.tasks.length);
-  else if (groupBy === "due") { const b = { Overdue: [], Today: [], Upcoming: [], "No date": [] }; baseTasks.forEach((t) => { if (!t.due) b["No date"].push(t); else if (overdue(t)) b.Overdue.push(t); else if (t.due === todayStr) b.Today.push(t); else b.Upcoming.push(t); }); groups = Object.entries(b).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortTasks) })).filter((g) => g.tasks.length); }
-  else if (groupBy === "category") { const m = {}; baseTasks.forEach((t) => { const c = (t.tags && t.tags[0]) ? "#" + t.tags[0] : "No category"; (m[c] = m[c] || []).push(t); }); groups = Object.entries(m).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortTasks) })); }
-  const homeFields = [], homeTops = [];
-  groups.forEach((g) => g.tasks.forEach((t) => { homeTops.push(t.id); homeFields.push(t.id); subsUnder(t.id).forEach((s) => homeFields.push(s.id)); }));
+
+  // Home's task list is the cross-project rollup, not the active board's
+  // tasks -- same grouping/sort controls, reused against `rollup` instead.
+  const rollupVisible = rollup.filter((t) => showArchived || !t.archived);
+  const rollupBase = (homeMode === "today" ? rollupVisible.filter((t) => t.today || (t.repeat && t.repeat !== "none")) : rollupVisible);
+  let rollupGroups = [];
+  if (groupBy === "none") rollupGroups = [{ label: null, tasks: rollupBase.slice().sort(sortTasks) }];
+  else if (groupBy === "priority") rollupGroups = [1, 2, 3, 0].map((lv) => ({ label: lv ? PRI[lv] : "No priority", tasks: rollupBase.filter((t) => (t.priority || 0) === lv).sort(sortTasks) })).filter((g) => g.tasks.length);
+  else if (groupBy === "due") { const b = { Overdue: [], Today: [], Upcoming: [], "No date": [] }; rollupBase.forEach((t) => { if (!t.due) b["No date"].push(t); else if (t.due < todayStr && !t.done) b.Overdue.push(t); else if (t.due === todayStr) b.Today.push(t); else b.Upcoming.push(t); }); rollupGroups = Object.entries(b).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortTasks) })).filter((g) => g.tasks.length); }
+  else if (groupBy === "category") { const m = {}; rollupBase.forEach((t) => { const c = (t.tags && t.tags[0]) ? "#" + t.tags[0] : "No category"; (m[c] = m[c] || []).push(t); }); rollupGroups = Object.entries(m).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortTasks) })); }
 
   function renderTaskRow(t, ctx) {
     const { showPath = false, fields = [], tops = [] } = ctx || {};
@@ -458,6 +549,34 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     );
   }
 
+  // A task assigned to the current user, possibly on a project other than
+  // the one currently loaded into `items` -- can't safely reuse
+  // renderTaskRow's update()/apply() calls (they only find items in the
+  // active board's local state). Mutations here go straight to the item's
+  // own board via syncItems, with an optimistic update to `rollup`.
+  function renderAssignedRow(t) {
+    const doneFlag = !!t.done;
+    const lv = t.priority || 0;
+    const overFlag = t.due && !doneFlag && (t.due < todayStr || (t.due === todayStr && t.time && t.time < nowHM));
+    const patchRollupItem = (patch) => {
+      const next = { ...t, ...patch };
+      setRollup((prev) => prev.map((x) => (x.id === t.id ? next : x)));
+      syncItems(t.boardId, [next], []).catch(() => flash("Couldn't save that."));
+    };
+    return (
+      <div key={t.id} className="flex items-center gap-2 py-1.5 group">
+        <button onClick={() => patchRollupItem({ done: !doneFlag })} className="shrink-0">
+          <span className={`flex items-center justify-center w-5 h-5 rounded-md border ${doneFlag ? "bg-teal-500 border-teal-500" : overFlag ? "border-red-300" : "border-stone-300"}`}>{doneFlag && <Check size={13} className="text-white" />}</span>
+        </button>
+        <button title="priority" onClick={() => patchRollupItem({ priority: (lv + 1) % 4 })} className={`shrink-0 ${lv ? PRI_COLOR[lv] : "text-stone-300 hover:text-stone-500"}`}><Flag size={13} fill={lv ? "currentColor" : "none"} /></button>
+        <span className={`min-w-0 flex-1 text-sm truncate ${doneFlag ? "line-through text-stone-400" : overFlag ? "text-red-600" : "text-stone-800"}`}>{t.name || "untitled task"}</span>
+        {tagPills(t)}
+        <Link href={`/app?board=${t.boardId}`} className="shrink-0 text-xs text-stone-400 hover:text-stone-700 border border-stone-200 rounded-full px-2 py-0.5">{t.projectName}</Link>
+        {t.due && <span className={`shrink-0 text-xs ${overFlag ? "text-red-500 font-medium" : "text-stone-500"}`}>{fmtLabel(t.due)}</span>}
+      </div>
+    );
+  }
+
   function renderNode(n) {
     const p = pos[n.id]; if (!p) return null;
     const isIdea = n.type === "idea"; const kind = isIdea ? "idea" : goalKind(n);
@@ -516,29 +635,60 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const inboxFields = unsorted.map((x) => x.id);
 
   return (
-    <div className="hs-root min-h-screen text-stone-200 font-sans" style={{ background: bg }} onClick={() => { repeatMenu && setRepeatMenu(null); switcherOpen && setSwitcherOpen(false); inviteOpen && setInviteOpen(false); accountOpen && closeAccountMenu(); }}>
+    <div className="hs-root min-h-screen text-stone-200 font-sans" style={{ background: bg }} onClick={() => { repeatMenu && setRepeatMenu(null); switcherOpen && setSwitcherOpen(false); inviteOpen && setInviteOpen(false); accountOpen && closeAccountMenu(); setNewProjectOpen(false); setRenamingProject(false); }}>
       <style>{`.hs-root .bg-white { background-color: ${panel} !important; }`}</style>
       <div className="max-w-5xl mx-auto px-4 py-5">
         <header className="flex items-center justify-between mb-5">
           <div className="flex items-baseline gap-2">
             <h1 className="font-mono font-bold text-lg tracking-tight text-white">hypersymmetry</h1>
             <span className="text-[9px] font-mono uppercase tracking-widest text-stone-500 border border-stone-700 rounded-full px-2 py-0.5">alpha</span>
-            {boards && boards.length > 1 && (
-              <span className="relative">
-                <button onClick={(e) => { e.stopPropagation(); setSwitcherOpen((v) => !v); }} className="text-xs text-stone-400 hover:text-stone-100 border border-stone-700 rounded-full px-2 py-0.5 ml-1">
-                  {boards.find((b) => b.id === boardId)?.isOwn ? "My board" : `${boards.find((b) => b.id === boardId)?.ownerUsername}'s board`}
-                </button>
-                {switcherOpen && (
-                  <div onClick={(e) => e.stopPropagation()} className="absolute left-0 top-7 z-30 bg-white border border-stone-200 rounded-lg shadow-lg p-1 w-48 text-sm text-stone-700">
-                    {boards.map((b) => (
-                      <Link key={b.id} href={`/app?board=${b.id}`} onClick={() => setSwitcherOpen(false)} className={`block px-2 py-1 rounded hover:bg-stone-100 ${b.id === boardId ? "text-teal-600 font-medium" : ""}`}>
-                        {b.isOwn ? "My board" : `${b.ownerUsername}'s board`}
-                      </Link>
-                    ))}
+            <span className="relative">
+              <button onClick={(e) => { e.stopPropagation(); setSwitcherOpen((v) => !v); }} className="text-xs text-stone-400 hover:text-stone-100 border border-stone-700 rounded-full px-2 py-0.5 ml-1">
+                {(boards || []).find((b) => b.id === boardId)?.name || "My board"}
+              </button>
+              {switcherOpen && (
+                <div onClick={(e) => e.stopPropagation()} className="absolute left-0 top-7 z-30 bg-white border border-stone-200 rounded-lg shadow-lg p-1 w-56 text-sm text-stone-700">
+                  {(boards || []).map((b) => (
+                    <div key={b.id} className="flex items-center gap-1">
+                      {renamingProject && b.id === boardId ? (
+                        <input
+                          autoFocus
+                          value={projectNameDraft}
+                          onChange={(e) => setProjectNameDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") doRenameProject(); if (e.key === "Escape") setRenamingProject(false); }}
+                          onBlur={doRenameProject}
+                          className="flex-1 text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300"
+                        />
+                      ) : (
+                        <Link href={`/app?board=${b.id}`} onClick={() => setSwitcherOpen(false)} className={`flex-1 px-2 py-1 rounded hover:bg-stone-100 truncate ${b.id === boardId ? "text-teal-600 font-medium" : ""}`}>
+                          {b.name}{!b.isOwn && <span className="text-stone-400 font-normal"> · @{b.ownerUsername}</span>}
+                        </Link>
+                      )}
+                      {b.isOwn && b.id === boardId && !renamingProject && (
+                        <button onClick={(e) => { e.stopPropagation(); setProjectNameDraft(b.name); setRenamingProject(true); }} className="text-stone-300 hover:text-stone-600 shrink-0 px-1"><Pencil size={12} /></button>
+                      )}
+                    </div>
+                  ))}
+                  <div className="border-t border-stone-100 mt-1 pt-1">
+                    {newProjectOpen ? (
+                      <div className="flex gap-1 px-1" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          autoFocus
+                          value={newProjectName}
+                          onChange={(e) => setNewProjectName(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") doCreateProject(); if (e.key === "Escape") setNewProjectOpen(false); }}
+                          placeholder="project name"
+                          className="flex-1 text-sm bg-stone-50 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-stone-300"
+                        />
+                        <button onClick={doCreateProject} className="text-xs px-2 py-1 rounded bg-teal-600 text-white hover:bg-teal-500">add</button>
+                      </div>
+                    ) : (
+                      <button onClick={(e) => { e.stopPropagation(); setNewProjectName(""); setNewProjectOpen(true); }} className="flex items-center gap-1 w-full text-left px-2 py-1 rounded hover:bg-stone-100 text-stone-600"><Plus size={13} />new project</button>
+                    )}
                   </div>
-                )}
-              </span>
-            )}
+                </div>
+              )}
+            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <NavBtn id="home" icon={Home} label="Home" />
@@ -678,26 +828,33 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
               <div className="flex items-center gap-1.5 mb-3 text-xs text-stone-500 flex-wrap">
                 <span className="uppercase tracking-wide">group</span>
                 <div className="flex bg-stone-100 rounded-lg p-0.5"><GroupBtn id="none" label="None" /><GroupBtn id="priority" label="Priority" /><GroupBtn id="due" label="Due" /><GroupBtn id="category" label="Category" /></div>
-                <button onClick={() => { const ids = new Set(baseTasks.filter((t) => taskDone(t) && !t.archived).map((t) => t.id)); if (ids.size) apply((p) => p.map((i) => ids.has(i.id) ? { ...i, archived: true } : i)); }} className="flex items-center gap-1 text-stone-500 hover:text-stone-800"><Archive size={13} />archive done</button>
+                <button onClick={() => {
+                  const toArchive = rollupBase.filter((t) => t.done && !t.archived);
+                  if (!toArchive.length) return;
+                  const byBoard = {};
+                  toArchive.forEach((t) => { (byBoard[t.boardId] = byBoard[t.boardId] || []).push({ ...t, archived: true }); });
+                  setRollup((prev) => prev.map((x) => (toArchive.some((t) => t.id === x.id) ? { ...x, archived: true } : x)));
+                  Object.entries(byBoard).forEach(([bId, upserts]) => syncItems(bId, upserts, []).catch(() => {}));
+                }} className="flex items-center gap-1 text-stone-500 hover:text-stone-800"><Archive size={13} />archive done</button>
                 <button title="show archived" onClick={() => setShowArchived((v) => !v)} className={`flex items-center gap-1 ${showArchived ? "text-stone-800" : "text-stone-400 hover:text-stone-600"}`}><Eye size={13} />{showArchived ? "hide archived" : "show archived"}</button>
                 {notif !== "granted" && notif !== "unsupported" && <button onClick={() => { try { Notification.requestPermission().then((p) => setNotif(p)); } catch {} }} className="flex items-center gap-1 ml-auto text-stone-500 hover:text-stone-800"><Bell size={13} />enable reminders</button>}
                 {notif === "granted" && <span className="flex items-center gap-1 ml-auto text-teal-600"><Bell size={13} />reminders on</span>}
               </div>
               <div className="flex items-center gap-2 mb-2 rounded-lg border border-dashed border-stone-300 px-2.5 py-1.5">
                 <Plus size={15} className="text-stone-400" />
-                <input ref={quickRef} className="bg-transparent outline-none text-sm flex-1 min-w-0" placeholder="add a task…  try: pay rent fri 9am !! #finance" value={quick} onChange={(e) => setQuick(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitQuick(); }} />
+                <input ref={quickRef} className="bg-transparent outline-none text-sm flex-1 min-w-0" placeholder="add a task…  try: pay rent fri 9am !! #finance" value={quick} onChange={(e) => setQuick(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitHomeQuick(); }} />
               </div>
-              {baseTasks.length === 0 ? <p className="text-sm text-stone-400 py-2">No tasks here yet. Add one above, or flag tasks in Plan with the sun.</p> : (
+              {rollupBase.length === 0 ? <p className="text-sm text-stone-400 py-2">Nothing assigned to you yet. Add a task above, or flag tasks in Plan with the sun.</p> : (
                 <div className="space-y-3">
-                  {groups.map((g, gi) => (
+                  {rollupGroups.map((g, gi) => (
                     <div key={gi}>
                       {g.label && <div className="text-xs uppercase tracking-wide text-stone-400 mb-0.5 px-1">{g.label} <span className="text-stone-300">· {g.tasks.length}</span></div>}
-                      <div className="divide-y divide-stone-100">{g.tasks.map((t) => renderTaskRow(t, { showPath: true, fields: homeFields, tops: homeTops }))}</div>
+                      <div className="divide-y divide-stone-100">{g.tasks.map((t) => renderAssignedRow(t))}</div>
                     </div>
                   ))}
                 </div>
               )}
-              <p className="text-xs text-stone-400 mt-3 px-1">press n for a new task · enter: new · tab / ⇧tab: indent / outdent · ↑ ↓: move · ⌘/ctrl+enter: complete · ⌘/ctrl+z: undo · #tag @person · see Help</p>
+              <p className="text-xs text-stone-400 mt-3 px-1">press n for a new task · #tag @person to assign · see Help</p>
             </section>
 
             <div className="space-y-5">
@@ -764,6 +921,14 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
         {view === "plan" && (
           <div className="flex gap-4">
             <aside className="w-56 shrink-0">
+              <div className="flex items-center gap-1.5 mb-2 px-1 text-stone-200"><Network size={13} className="text-violet-400" /><span className="text-xs uppercase tracking-wide">projects</span></div>
+              <div className="space-y-1 mb-4">
+                {(boards || []).map((b) => (
+                  <Link key={b.id} href={`/app?board=${b.id}`} className={`block text-sm truncate rounded-lg px-2 py-1.5 ${b.id === boardId ? "bg-white text-stone-900 font-medium" : "text-stone-300 hover:bg-stone-800"}`}>
+                    {b.name}
+                  </Link>
+                ))}
+              </div>
               <div className="flex items-center gap-1.5 mb-2 px-1 text-stone-200"><Star size={13} className="text-amber-400" /><span className="text-xs uppercase tracking-wide">starred ideas</span></div>
               <p className="text-xs text-stone-400 mb-2 px-1">Pruned and ready. Tap the canvas icon to place one on the grid.</p>
               <div className="space-y-1.5">
@@ -811,6 +976,22 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
           </div>
         )}
         {warn && <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-stone-900 text-white text-sm px-3 py-2 rounded-lg shadow-lg flex items-center gap-2"><AlertTriangle size={15} className="text-amber-400" />{warn}</div>}
+        {mentionPopup && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setMentionPopup(null)}>
+            <div onClick={(e) => e.stopPropagation()} className="bg-white rounded-xl shadow-lg p-4 w-80 text-sm text-stone-700">
+              {mentionPopup.status === "needs_confirmation" && (
+                <p className="mb-3">@{mentionPopup.username} isn&apos;t your friend yet. Send friend request?</p>
+              )}
+              {mentionPopup.status === "needs_invite" && (
+                <p className="mb-3">{mentionPopup.email} doesn&apos;t have an account yet. Invite them to hypersymmetry and this project?</p>
+              )}
+              <div className="flex gap-2">
+                <button onClick={() => handleMentionConfirm(true)} className="px-3 py-1.5 rounded bg-teal-600 text-white hover:bg-teal-500">Yes</button>
+                <button onClick={() => handleMentionConfirm(false)} className="px-3 py-1.5 rounded text-stone-500 hover:bg-stone-100">No</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

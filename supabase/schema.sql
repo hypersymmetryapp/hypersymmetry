@@ -137,3 +137,130 @@ alter publication supabase_realtime add table public.items;
 alter table public.profiles
   add column bg_color text not null default '#000000',
   add column panel_color text not null default '#ffffff';
+
+-- Owner can rename their boards (projects).
+create policy "Owner can rename their boards"
+  on public.boards for update using (owner_id = auth.uid());
+
+-- Friends: a symmetric relationship, canonically ordered (user_a < user_b)
+-- so each pair has exactly one row regardless of which direction it was
+-- created from.
+create table public.friendships (
+  user_a uuid references auth.users(id) on delete cascade not null,
+  user_b uuid references auth.users(id) on delete cascade not null,
+  created_at timestamptz default now(),
+  primary key (user_a, user_b),
+  check (user_a < user_b)
+);
+
+alter table public.friendships enable row level security;
+
+create policy "Users can view their own friendships"
+  on public.friendships for select using (auth.uid() = user_a or auth.uid() = user_b);
+
+create function public.add_friendship(a uuid, b uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if a = b then return; end if;
+  insert into public.friendships (user_a, user_b)
+  values (least(a, b), greatest(a, b))
+  on conflict do nothing;
+end;
+$$;
+
+create function public.are_friends(a uuid, b uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.friendships
+    where user_a = least(a, b) and user_b = greatest(a, b)
+  );
+$$;
+
+-- Fan-out: joining a board makes you friends with every existing member,
+-- regardless of which code path added the membership row (username invite,
+-- email invite, self-heal). This keeps "everyone in a project is friends"
+-- a DB invariant instead of something every call site has to remember.
+create function public.fan_out_friendships()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  m record;
+begin
+  for m in
+    select user_id from public.board_members
+    where board_id = new.board_id and user_id <> new.user_id
+  loop
+    perform public.add_friendship(new.user_id, m.user_id);
+  end loop;
+  return new;
+end;
+$$;
+
+create trigger on_board_member_added
+  after insert on public.board_members
+  for each row execute function public.fan_out_friendships();
+
+-- Store email on profiles (denormalized from auth.users) so server-side code
+-- can look up "does an account with this email exist" without needing the
+-- auth schema exposed via PostgREST. Column-level REVOKE keeps this out of
+-- reach of the broad "any authenticated user can view any profile" policy
+-- above, which is intentionally public for username discovery but must not
+-- leak email addresses the same way -- RLS is row-level only, so the policy
+-- alone can't restrict this to a single column.
+alter table public.profiles add column email text;
+update public.profiles p set email = u.email from auth.users u where p.id = u.id;
+revoke select (email) on public.profiles from authenticated, anon;
+
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  new_board_id uuid;
+begin
+  insert into public.profiles (id, username, email)
+  values (new.id, new.raw_user_meta_data->>'username', new.email);
+
+  insert into public.boards (owner_id, name)
+  values (new.id, 'My board')
+  returning id into new_board_id;
+
+  insert into public.board_members (board_id, user_id, role)
+  values (new_board_id, new.id, 'owner');
+
+  return new;
+end;
+$$;
+
+-- Re-assert the boards INSERT policy: createProject() was hitting
+-- "new row violates row-level security policy for table boards" in testing,
+-- meaning this policy was missing/stale in the live DB despite being in this
+-- file's history. Drop-and-recreate is idempotent and safe to run regardless
+-- of current state.
+drop policy if exists "Users can create their own boards" on public.boards;
+create policy "Users can create their own boards"
+  on public.boards for insert with check (owner_id = auth.uid());
+
+-- Root cause of the above: INSERT ... RETURNING also requires the new row to
+-- pass the table's SELECT policy (Postgres shows this back to you as the
+-- same RLS error, since it can't return a row you're not allowed to see).
+-- createProject() inserts the board and asks for `.select('id')` back before
+-- the matching board_members owner row exists, so is_board_member(id) was
+-- false at that instant and the whole insert was rejected. Let an owner
+-- always see their own board regardless of membership rows.
+drop policy if exists "Members can view their boards" on public.boards;
+create policy "Members can view their boards"
+  on public.boards for select using (public.is_board_member(id) or owner_id = auth.uid());

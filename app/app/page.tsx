@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { listMyBoards, listBoardMembers, ensureUserBoard } from "@/app/actions";
+import { listMyBoards, listBoardMembers, ensureUserBoard, listAssignedToMe } from "@/app/actions";
 import Hypersymmetry from "@/components/Hypersymmetry";
 
 export default async function Home({
@@ -35,12 +35,13 @@ export default async function Home({
 
   if (!activeBoard) redirect("/login");
 
-  const [{ data: itemRows }, members] = await Promise.all([
+  const [{ data: itemRows }, members, assignedToMe] = await Promise.all([
     supabase
       .from("items")
       .select("id, type, parent_id, fields")
       .eq("board_id", activeBoard.id),
     listBoardMembers(activeBoard.id),
+    listAssignedToMe(),
   ]);
 
   const initialItems = (itemRows ?? []).map((row) => ({
@@ -61,6 +62,7 @@ export default async function Home({
       boardId={activeBoard.id}
       boards={boards}
       members={members}
+      assignedToMe={assignedToMe}
     />
   );
 }

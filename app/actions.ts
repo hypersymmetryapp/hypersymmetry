@@ -5,6 +5,7 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import { redirect } from 'next/navigation'
 
 const HEX_RE = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 type ClientItem = {
   id: string
@@ -144,6 +145,177 @@ export async function listBoardMembers(boardId: string) {
     role: m.role,
     username: usernameById.get(m.user_id) ?? '(unknown)',
   }))
+}
+
+export async function createProject(name: string): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const trimmed = name.trim().slice(0, 60) || 'New project'
+  const { data: board, error: boardError } = await supabase
+    .from('boards')
+    .insert({ owner_id: user.id, name: trimmed })
+    .select('id')
+    .single()
+  if (boardError) return { ok: false, error: boardError.message }
+
+  const { error: memberError } = await supabase
+    .from('board_members')
+    .insert({ board_id: board.id, user_id: user.id, role: 'owner' })
+  if (memberError) return { ok: false, error: memberError.message }
+
+  return { ok: true, id: board.id }
+}
+
+export async function renameProject(boardId: string, name: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  const trimmed = name.trim().slice(0, 60)
+  if (!trimmed) return { ok: false, error: 'Name cannot be empty.' }
+
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const { error } = await supabase.from('boards').update({ name: trimmed }).eq('id', boardId)
+  if (error) return { ok: false, error: error.message }
+  return { ok: true }
+}
+
+type AssigneeResolution =
+  | { status: 'ok'; userId: string; username: string }
+  | { status: 'needs_confirmation'; userId: string; username: string }
+  | { status: 'needs_invite'; email: string }
+  | { status: 'not_found' }
+
+async function generateUsername(admin: ReturnType<typeof createAdminClient>, email: string) {
+  const base = (email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '').slice(0, 16) || 'user').padEnd(3, '0')
+  let candidate = base
+  let suffix = 0
+  for (;;) {
+    const { data } = await admin.from('profiles').select('id').eq('username', candidate).maybeSingle()
+    if (!data) return candidate
+    suffix += 1
+    candidate = `${base}${suffix}`.slice(0, 20)
+  }
+}
+
+// A friend already, or already a member of this board -- either way, safe to
+// attach as an assignee outright. Ensures board membership if they're a
+// friend from elsewhere but not yet on this specific board (silent, since
+// spam-prevention only applies to non-friends, and they've already cleared
+// that bar). Otherwise flags that the caller needs to confirm first.
+async function resolveKnownUser(
+  meId: string,
+  theirId: string,
+  username: string,
+  boardId: string,
+  admin: ReturnType<typeof createAdminClient>
+): Promise<AssigneeResolution> {
+  if (meId === theirId) return { status: 'ok', userId: theirId, username }
+
+  const { data: friends } = await admin.rpc('are_friends', { a: meId, b: theirId })
+  if (!friends) return { status: 'needs_confirmation', userId: theirId, username }
+
+  const { error } = await admin.from('board_members').insert({ board_id: boardId, user_id: theirId, role: 'editor' })
+  if (error && !/duplicate key/i.test(error.message)) throw error
+  return { status: 'ok', userId: theirId, username }
+}
+
+// Resolves an @token typed in a task to a real account, without blocking
+// task creation -- the caller attaches the assignee once this returns.
+export async function resolveAssignee(boardId: string, token: string): Promise<AssigneeResolution> {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+  const admin = createAdminClient()
+
+  if (EMAIL_RE.test(token)) {
+    const { data: existing } = await admin.from('profiles').select('id, username').eq('email', token).maybeSingle()
+    if (!existing) return { status: 'needs_invite', email: token }
+    return resolveKnownUser(user.id, existing.id, existing.username, boardId, admin)
+  }
+
+  const { data: profile } = await supabase.from('profiles').select('id, username').eq('username', token).maybeSingle()
+  if (!profile) return { status: 'not_found' }
+  return resolveKnownUser(user.id, profile.id, profile.username, boardId, admin)
+}
+
+// Called after the user answers "send friend request?" / "invite them?" with
+// yes. Both cases resolve to the same action: add them to this project,
+// which fans out friendship to every existing member via the DB trigger.
+export async function confirmAssignee(
+  boardId: string,
+  origin: string,
+  input: { userId: string } | { email: string }
+): Promise<{ ok: true; userId: string; username: string } | { ok: false; error: string }> {
+  const supabase = await createClient()
+  const { data: { user: me } } = await supabase.auth.getUser()
+  if (!me) throw new Error('Not authenticated')
+  const admin = createAdminClient()
+
+  let userId: string
+  let username: string
+
+  if ('email' in input) {
+    const placeholder = await generateUsername(admin, input.email)
+    const { data, error } = await admin.auth.admin.inviteUserByEmail(input.email, {
+      data: { username: placeholder, invited_by: me.id },
+      redirectTo: `${origin}/auth/accept-invite`,
+    })
+    if (error || !data?.user) return { ok: false, error: error?.message || 'Could not send invite.' }
+    userId = data.user.id
+    username = placeholder
+  } else {
+    userId = input.userId
+    const { data: profile } = await admin.from('profiles').select('username').eq('id', userId).maybeSingle()
+    username = profile?.username ?? ''
+  }
+
+  const { error: memberError } = await admin.from('board_members').insert({ board_id: boardId, user_id: userId, role: 'editor' })
+  if (memberError && !/duplicate key/i.test(memberError.message)) return { ok: false, error: memberError.message }
+
+  return { ok: true, userId, username }
+}
+
+// Every task assigned to the current user across every project they belong
+// to, for the Home rollup. Filtered in JS rather than a JSONB containment
+// query -- simpler and plenty fast at this scale.
+export async function listAssignedToMe() {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) throw new Error('Not authenticated')
+
+  const boards = await listMyBoards()
+  if (!boards.length) return []
+
+  const { data: rows, error } = await supabase
+    .from('items')
+    .select('id, type, parent_id, board_id, fields')
+    .in('board_id', boards.map((b) => b.id))
+    .eq('type', 'task')
+  if (error) throw error
+
+  const projectName = new Map(boards.map((b) => [b.id, b.isOwn ? b.name : `${b.ownerUsername}'s board`]))
+  const ownedBoardIds = new Set(boards.filter((b) => b.isOwn).map((b) => b.id))
+
+  return (rows ?? [])
+    .filter((r) => {
+      const ids = (r.fields as { assigneeIds?: unknown })?.assigneeIds
+      if (Array.isArray(ids) && ids.length) return ids.includes(user.id)
+      // Unassigned tasks default to the owner of the board they're on --
+      // preserves plain solo use (nobody ever sets an assignee) without
+      // every unassigned task on a shared project also showing up for
+      // every collaborator.
+      return ownedBoardIds.has(r.board_id)
+    })
+    .map((r) => ({
+      id: r.id,
+      type: r.type,
+      parentId: r.parent_id,
+      boardId: r.board_id,
+      projectName: projectName.get(r.board_id) ?? '',
+      ...(r.fields as Record<string, unknown>),
+    }))
 }
 
 export async function updateTheme(bgColor: string, panelColor: string): Promise<{ ok: true } | { ok: false; error: string }> {
