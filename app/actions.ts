@@ -292,30 +292,40 @@ export async function listAssignedToMe() {
     .from('items')
     .select('id, type, parent_id, board_id, fields')
     .in('board_id', boards.map((b) => b.id))
-    .eq('type', 'task')
+    .in('type', ['task', 'subtask'])
   if (error) throw error
 
   const projectName = new Map(boards.map((b) => [b.id, b.isOwn ? b.name : `${b.ownerUsername}'s board`]))
   const ownedBoardIds = new Set(boards.filter((b) => b.isOwn).map((b) => b.id))
 
-  return (rows ?? [])
-    .filter((r) => {
-      const ids = (r.fields as { assigneeIds?: unknown })?.assigneeIds
-      if (Array.isArray(ids) && ids.length) return ids.includes(user.id)
-      // Unassigned tasks default to the owner of the board they're on --
-      // preserves plain solo use (nobody ever sets an assignee) without
-      // every unassigned task on a shared project also showing up for
-      // every collaborator.
-      return ownedBoardIds.has(r.board_id)
-    })
-    .map((r) => ({
-      id: r.id,
-      type: r.type,
-      parentId: r.parent_id,
-      boardId: r.board_id,
-      projectName: projectName.get(r.board_id) ?? '',
-      ...(r.fields as Record<string, unknown>),
-    }))
+  const matchedTasks = (rows ?? []).filter((r) => {
+    if (r.type !== 'task') return false
+    const ids = (r.fields as { assigneeIds?: unknown })?.assigneeIds
+    if (Array.isArray(ids) && ids.length) return ids.includes(user.id)
+    // Unassigned tasks default to the owner of the board they're on --
+    // preserves plain solo use (nobody ever sets an assignee) without
+    // every unassigned task on a shared project also showing up for
+    // every collaborator.
+    return ownedBoardIds.has(r.board_id)
+  })
+  const matchedIds = new Set(matchedTasks.map((r) => r.id))
+  // Subtasks aren't independently assigned -- pull in whichever ones belong
+  // to a task that made the cut above, so the rollup can show/edit them the
+  // same way the per-project checklist does.
+  const matchedSubtasks = (rows ?? []).filter((r) => r.type === 'subtask' && r.parent_id && matchedIds.has(r.parent_id))
+
+  return [...matchedTasks, ...matchedSubtasks].map((r) => ({
+    id: r.id,
+    type: r.type,
+    parentId: r.parent_id,
+    // boardId/projectName also get persisted into `fields` client-side (so
+    // syncItems has everything it needs for a new row), but the computed
+    // values here must win on every fetch -- otherwise a renamed project
+    // would leave old rollup rows showing the stale name forever.
+    ...(r.fields as Record<string, unknown>),
+    boardId: r.board_id,
+    projectName: projectName.get(r.board_id) ?? '',
+  }))
 }
 
 export async function updateTheme(bgColor: string, panelColor: string): Promise<{ ok: true } | { ok: false; error: string }> {

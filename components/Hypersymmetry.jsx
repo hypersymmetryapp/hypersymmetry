@@ -128,6 +128,8 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const warnTimer = useRef();
   const saveTimer = useRef();
   const lastSynced = useRef(initialItems || []);
+  const rollupSaveTimer = useRef();
+  const lastSyncedRollup = useRef(assignedToMe || []);
   const assigneeAttempts = useRef(new Map());
   const selRef = useRef(sel);
   const viewRef = useRef(view);
@@ -159,6 +161,29 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     }, 600);
     return () => clearTimeout(saveTimer.current);
   }, [items, boardId]);
+  // Same debounced-sync pattern as `items` above, but rollup rows can each
+  // belong to a different board, so upserts/deletes get grouped by boardId
+  // and sent as one syncItems call per board instead of one call total.
+  useEffect(() => {
+    if (!loaded.current) return;
+    clearTimeout(rollupSaveTimer.current);
+    rollupSaveTimer.current = setTimeout(() => {
+      const prevById = new Map(lastSyncedRollup.current.map((i) => [i.id, i]));
+      const nextIds = new Set(rollup.map((i) => i.id));
+      const changed = rollup.filter((i) => JSON.stringify(prevById.get(i.id)) !== JSON.stringify(i));
+      const deleted = lastSyncedRollup.current.filter((i) => !nextIds.has(i.id));
+      if (!changed.length && !deleted.length) { lastSyncedRollup.current = rollup; return; }
+      const upsertsByBoard = new Map();
+      changed.forEach((i) => { if (!i.boardId) return; const arr = upsertsByBoard.get(i.boardId) || []; arr.push(i); upsertsByBoard.set(i.boardId, arr); });
+      const deletesByBoard = new Map();
+      deleted.forEach((i) => { if (!i.boardId) return; const arr = deletesByBoard.get(i.boardId) || []; arr.push(i.id); deletesByBoard.set(i.boardId, arr); });
+      const boardIds = new Set([...upsertsByBoard.keys(), ...deletesByBoard.keys()]);
+      Promise.all([...boardIds].map((bId) => syncItems(bId, upsertsByBoard.get(bId) || [], deletesByBoard.get(bId) || [])))
+        .then(() => { lastSyncedRollup.current = rollup; })
+        .catch(() => {});
+    }, 600);
+    return () => clearTimeout(rollupSaveTimer.current);
+  }, [rollup]);
   useEffect(() => {
     const supabase = createClient();
     const channel = supabase
@@ -324,6 +349,46 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const backspaceEmpty = (id, fields) => { const i = fields.indexOf(id); const prev = i > 0 ? fields[i - 1] : null; remove(id); if (prev) setFocus(prev); };
   const toggleDesc = (id) => setDescOpen((o) => ({ ...o, [id]: !o[id] }));
   const flash = (m) => { setWarn(m); clearTimeout(warnTimer.current); warnTimer.current = setTimeout(() => setWarn(""), 2500); };
+
+  // Same mutator shapes as the board-scoped ones above (apply/edit/update/...),
+  // rebuilt against an arbitrary list + setter so Home's cross-project rollup
+  // can get the exact same editing/subtask/indent affordances as a normal
+  // board's checklist, instead of the read-mostly row it had before. No undo
+  // history here -- rollup edits are comparatively rare and span boards, so
+  // wiring it into the same past/future stack as the active board isn't
+  // worth the complexity.
+  function makeOps(list, setList) {
+    const applyFn = (updater) => setList(updater);
+    const editFn = (id, f) => setList((prev) => prev.map((i) => (i.id === id ? { ...i, ...f } : i)));
+    const updateFn = (id, f) => applyFn((prev) => prev.map((i) => (i.id === id ? { ...i, ...f } : i)));
+    const toggleFn = (id, k) => applyFn((prev) => prev.map((i) => (i.id === id ? { ...i, [k]: !i[k] } : i)));
+    const subsUnderFn = (tid) => list.filter((i) => i.type === "subtask" && i.parentId === tid);
+    const taskDoneFn = (t) => { const s = subsUnderFn(t.id); return s.length ? s.every((x) => x.done) : !!t.done; };
+    const checkTaskFn = (t) => {
+      if (t.repeat && t.repeat !== "none" && !subsUnderFn(t.id).length) { updateFn(t.id, { due: nextDue(t.due, t.repeat, t.repeatN, todayStr), done: false }); return; }
+      updateFn(t.id, { done: !t.done });
+    };
+    const toggleSubFn = (s) => applyFn((prev) => {
+      const np = prev.map((i) => (i.id === s.id ? { ...i, done: !i.done } : i));
+      const sibs = np.filter((i) => i.type === "subtask" && i.parentId === s.parentId);
+      const parent = np.find((i) => i.id === s.parentId);
+      if (sibs.length && sibs.every((x) => x.done) && parent && parent.repeat && parent.repeat !== "none") {
+        const nd = nextDue(parent.due, parent.repeat, parent.repeatN, todayStr);
+        return np.map((i) => i.id === parent.id ? { ...i, due: nd } : (i.type === "subtask" && i.parentId === parent.id ? { ...i, done: false } : i));
+      }
+      return np;
+    });
+    const removeFn = (id) => applyFn((prev) => { const kill = new Set([id]); let chg = true; while (chg) { chg = false; for (const it of prev) if (it.parentId && kill.has(it.parentId) && !kill.has(it.id)) { kill.add(it.id); chg = true; } } return prev.filter((i) => !kill.has(i.id)); });
+    const addSubFn = (taskId, extra) => { const id = uid(); applyFn((p) => [...p, { id, type: "subtask", parentId: taskId, name: "", done: false, ...extra }]); setFocus(id); };
+    const addTaskAfterFn = (t, patch, extra) => { const id = uid(); const loose = t.parentId == null; applyFn((p) => { const base = patch ? p.map((i) => (i.id === t.id ? { ...i, ...patch } : i)) : p; const idx = base.findIndex((i) => i.id === t.id); let j = idx + 1; while (j < base.length && base[j].type === "subtask" && base[j].parentId === t.id) j++; const nt = { id, type: "task", parentId: t.parentId ?? null, name: "", today: loose ? homeMode === "today" : false, done: false, priority: 0, tags: loose ? (t.tags || []) : [], ...extra }; return [...base.slice(0, j), nt, ...base.slice(j)]; }); setFocus(id); };
+    const addSubAfterFn = (s, extra) => { const id = uid(); applyFn((p) => { const idx = p.findIndex((i) => i.id === s.id); return [...p.slice(0, idx + 1), { id, type: "subtask", parentId: s.parentId, name: "", done: false, ...extra }, ...p.slice(idx + 1)]; }); setFocus(id); };
+    const indentTaskFn = (t, tops) => { if (subsUnderFn(t.id).length) return; const i = tops.indexOf(t.id); if (i <= 0) return; const prevId = tops[i - 1]; applyFn((p) => { const without = p.filter((x) => x.id !== t.id); const conv = { ...t, type: "subtask", parentId: prevId }; const idx = without.findIndex((x) => x.id === prevId); let j = idx + 1; while (j < without.length && without[j].type === "subtask" && without[j].parentId === prevId) j++; return [...without.slice(0, j), conv, ...without.slice(j)]; }); setFocus(t.id); };
+    const outdentSubFn = (s) => { applyFn((p) => { const parent = p.find((i) => i.id === s.parentId); if (!parent) return p; const without = p.filter((x) => x.id !== s.id); const conv = { id: s.id, type: "task", parentId: null, name: s.name, today: homeMode === "today", done: s.done, priority: 0, tags: [], boardId: s.boardId, projectName: s.projectName }; const idx = without.findIndex((x) => x.id === parent.id); let j = idx + 1; while (j < without.length && without[j].type === "subtask" && without[j].parentId === parent.id) j++; return [...without.slice(0, j), conv, ...without.slice(j)]; }); setFocus(s.id); };
+    const backspaceEmptyFn = (id, fields) => { const i = fields.indexOf(id); const prev = i > 0 ? fields[i - 1] : null; removeFn(id); if (prev) setFocus(prev); };
+    return { apply: applyFn, edit: editFn, update: updateFn, toggle: toggleFn, subsUnder: subsUnderFn, taskDone: taskDoneFn, checkTask: checkTaskFn, toggleSub: toggleSubFn, remove: removeFn, addSub: addSubFn, addTaskAfter: addTaskAfterFn, addSubAfter: addSubAfterFn, indentTask: indentTaskFn, outdentSub: outdentSubFn, backspaceEmpty: backspaceEmptyFn };
+  }
+  const rollupOps = makeOps(rollup, setRollup);
+  const overdueRollup = (t) => { if (rollupOps.taskDone(t) || !t.due) return false; if (t.due < todayStr) return true; if (t.due === todayStr && t.time) return t.time < nowHM; return false; };
   const doInvite = () => {
     const name = inviteName.trim();
     if (!name) return;
@@ -388,12 +453,12 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     const r = parseQuick(quick);
     const name = r.name || quick.trim();
     if (!name) return;
-    const myBoardId = (boards || []).find((b) => b.isOwn)?.id || boardId;
+    const myBoard = (boards || []).find((b) => b.isOwn);
+    const myBoardId = myBoard?.id || boardId;
     const id = uid();
-    const newTask = { id, type: "task", parentId: null, name, today: true, done: false, due: r.due, time: r.time, priority: r.priority, tags: r.tags, assignees: r.assignees, desc: r.desc };
+    const newTask = { id, type: "task", parentId: null, name, today: true, done: false, due: r.due, time: r.time, priority: r.priority, tags: r.tags, assignees: r.assignees, desc: r.desc, boardId: myBoardId, projectName: myBoard?.name || "" };
     setQuick("");
     setRollup((prev) => [...prev, newTask]);
-    syncItems(myBoardId, [newTask], []).catch(() => flash("Couldn't save that task."));
   };
   const doCreateProject = () => {
     const name = newProjectName.trim();
@@ -435,10 +500,12 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
   const stop = { onPointerDown: (e) => e.stopPropagation(), onClick: (e) => e.stopPropagation() };
   const reg = (id) => (el) => { if (el) { inputs.current[id] = el; if (el.tagName === "TEXTAREA") autoResize(el); } else delete inputs.current[id]; };
   const noteArea = "w-full text-sm bg-stone-50 rounded-lg p-2 outline-none focus:ring-1 focus:ring-stone-300 text-stone-700 resize-none";
-  const tagPills = (it) => (<>
-    {(it.tags || []).map((tg) => <button key={"t" + tg} onClick={() => update(it.id, { tags: (it.tags || []).filter((x) => x !== tg) })} className="shrink-0 text-xs px-1.5 py-0.5 rounded bg-stone-100 text-stone-500 hover:bg-stone-200">#{tg}</button>)}
-    {(it.assignees || []).map((a) => <button key={"a" + a} onClick={() => update(it.id, { assignees: (it.assignees || []).filter((x) => x !== a) })} className="shrink-0 text-xs px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 hover:bg-sky-200">@{a}</button>)}
+  const tagPillsFor = (updateFn) => (it) => (<>
+    {(it.tags || []).map((tg) => <button key={"t" + tg} onClick={() => updateFn(it.id, { tags: (it.tags || []).filter((x) => x !== tg) })} className="shrink-0 text-xs px-1.5 py-0.5 rounded bg-stone-100 text-stone-500 hover:bg-stone-200">#{tg}</button>)}
+    {(it.assignees || []).map((a) => <button key={"a" + a} onClick={() => updateFn(it.id, { assignees: (it.assignees || []).filter((x) => x !== a) })} className="shrink-0 text-xs px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 hover:bg-sky-200">@{a}</button>)}
   </>);
+  const tagPills = tagPillsFor(update);
+  const rollupTagPills = tagPillsFor(rollupOps.update);
   const tagEditor = (n) => (
     <div className="mb-3">
       <div className="text-xs uppercase tracking-wide text-stone-400 mb-1">tags & people</div>
@@ -447,17 +514,24 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     </div>
   );
 
-  const sortTasks = (a, b) => { const dn = (taskDone(a) ? 1 : 0) - (taskDone(b) ? 1 : 0); if (dn) return dn; const pa = a.priority || 9, pb = b.priority || 9; if (pa !== pb) return pa - pb; return (a.due || "9999") < (b.due || "9999") ? -1 : 1; };
+  const makeSortTasks = (taskDoneFn) => (a, b) => { const dn = (taskDoneFn(a) ? 1 : 0) - (taskDoneFn(b) ? 1 : 0); if (dn) return dn; const pa = a.priority || 9, pb = b.priority || 9; if (pa !== pb) return pa - pb; return (a.due || "9999") < (b.due || "9999") ? -1 : 1; };
+  const sortTasks = makeSortTasks(taskDone);
+  const sortRollupTasks = makeSortTasks(rollupOps.taskDone);
 
   // Home's task list is the cross-project rollup, not the active board's
   // tasks -- same grouping/sort controls, reused against `rollup` instead.
-  const rollupVisible = rollup.filter((t) => showArchived || !t.archived);
+  // `rollup` also carries the subtasks of matched tasks (so they can be
+  // shown/edited inline) -- filter to top-level tasks here, subtasks are
+  // pulled in per-task via rollupOps.subsUnder when rendering each row.
+  const rollupVisible = rollup.filter((t) => t.type === "task" && (showArchived || !t.archived));
   const rollupBase = (homeMode === "today" ? rollupVisible.filter((t) => t.today || (t.repeat && t.repeat !== "none")) : rollupVisible);
   let rollupGroups = [];
-  if (groupBy === "none") rollupGroups = [{ label: null, tasks: rollupBase.slice().sort(sortTasks) }];
-  else if (groupBy === "priority") rollupGroups = [1, 2, 3, 0].map((lv) => ({ label: lv ? PRI[lv] : "No priority", tasks: rollupBase.filter((t) => (t.priority || 0) === lv).sort(sortTasks) })).filter((g) => g.tasks.length);
-  else if (groupBy === "due") { const b = { Overdue: [], Today: [], Upcoming: [], "No date": [] }; rollupBase.forEach((t) => { if (!t.due) b["No date"].push(t); else if (t.due < todayStr && !t.done) b.Overdue.push(t); else if (t.due === todayStr) b.Today.push(t); else b.Upcoming.push(t); }); rollupGroups = Object.entries(b).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortTasks) })).filter((g) => g.tasks.length); }
-  else if (groupBy === "category") { const m = {}; rollupBase.forEach((t) => { const c = (t.tags && t.tags[0]) ? "#" + t.tags[0] : "No category"; (m[c] = m[c] || []).push(t); }); rollupGroups = Object.entries(m).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortTasks) })); }
+  if (groupBy === "none") rollupGroups = [{ label: null, tasks: rollupBase.slice().sort(sortRollupTasks) }];
+  else if (groupBy === "priority") rollupGroups = [1, 2, 3, 0].map((lv) => ({ label: lv ? PRI[lv] : "No priority", tasks: rollupBase.filter((t) => (t.priority || 0) === lv).sort(sortRollupTasks) })).filter((g) => g.tasks.length);
+  else if (groupBy === "due") { const b = { Overdue: [], Today: [], Upcoming: [], "No date": [] }; rollupBase.forEach((t) => { if (!t.due) b["No date"].push(t); else if (t.due < todayStr && !t.done) b.Overdue.push(t); else if (t.due === todayStr) b.Today.push(t); else b.Upcoming.push(t); }); rollupGroups = Object.entries(b).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortRollupTasks) })).filter((g) => g.tasks.length); }
+  else if (groupBy === "category") { const m = {}; rollupBase.forEach((t) => { const c = (t.tags && t.tags[0]) ? "#" + t.tags[0] : "No category"; (m[c] = m[c] || []).push(t); }); rollupGroups = Object.entries(m).map(([label, tasks]) => ({ label, tasks: tasks.sort(sortRollupTasks) })); }
+  const rollupFields = []; rollupBase.forEach((t) => { rollupFields.push(t.id); rollupOps.subsUnder(t.id).forEach((s) => rollupFields.push(s.id)); });
+  const rollupTops = rollupBase.map((t) => t.id);
 
   function renderTaskRow(t, ctx) {
     const { showPath = false, fields = [], tops = [] } = ctx || {};
@@ -549,30 +623,98 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
     );
   }
 
-  // A task assigned to the current user, possibly on a project other than
-  // the one currently loaded into `items` -- can't safely reuse
-  // renderTaskRow's update()/apply() calls (they only find items in the
-  // active board's local state). Mutations here go straight to the item's
-  // own board via syncItems, with an optimistic update to `rollup`.
-  function renderAssignedRow(t) {
-    const doneFlag = !!t.done;
+  // Same shape as renderTaskRow, built on rollupOps instead of the
+  // board-scoped mutators (a rollup row can belong to a different board than
+  // whatever's currently active, so it can't reuse update()/apply() which
+  // only ever look inside `items`). Full editing, subtasks, and Tab-indent
+  // all work here now -- the earlier version of this row was read-mostly,
+  // which was a real regression for anyone using Home as their main list.
+  function renderRollupTaskRow(t, ctx) {
+    const { fields = [], tops = [] } = ctx || {};
+    const subs = rollupOps.subsUnder(t.id); const done = rollupOps.taskDone(t); const over = overdueRollup(t);
     const lv = t.priority || 0;
-    const overFlag = t.due && !doneFlag && (t.due < todayStr || (t.due === todayStr && t.time && t.time < nowHM));
-    const patchRollupItem = (patch) => {
-      const next = { ...t, ...patch };
-      setRollup((prev) => prev.map((x) => (x.id === t.id ? next : x)));
-      syncItems(t.boardId, [next], []).catch(() => flash("Couldn't save that."));
+    const onTaskKey = (e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!subs.length) rollupOps.checkTask(t); return; }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const r = parseQuick(t.name);
+        const patch = (r.due || r.time || r.priority || r.tags.length || r.assignees.length || r.desc) ? {
+          name: r.name || t.name,
+          due: r.due || t.due,
+          time: r.time || t.time,
+          priority: r.priority || t.priority,
+          tags: Array.from(new Set([...(t.tags || []), ...r.tags])),
+          assignees: Array.from(new Set([...(t.assignees || []), ...r.assignees])),
+          desc: r.desc || t.desc,
+        } : null;
+        rollupOps.addTaskAfter(t, patch, { boardId: t.boardId, projectName: t.projectName });
+        return;
+      }
+      if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); rollupOps.indentTask(t, tops); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); nav(-1, t.id, fields); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); nav(1, t.id, fields); return; }
+      if (e.key === "Escape") { e.target.blur(); return; }
+      if (e.key === "Backspace" && t.name === "") { e.preventDefault(); rollupOps.backspaceEmpty(t.id, fields); return; }
+    };
+    const onSubKey = (e, s) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); rollupOps.toggleSub(s); return; }
+      if (e.key === "Enter") { e.preventDefault(); rollupOps.addSubAfter(s, { boardId: s.boardId, projectName: s.projectName }); return; }
+      if (e.key === "Tab") { e.preventDefault(); rollupOps.outdentSub(s); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); nav(-1, s.id, fields); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); nav(1, s.id, fields); return; }
+      if (e.key === "Escape") { e.target.blur(); return; }
+      if (e.key === "Backspace" && s.name === "") { e.preventDefault(); rollupOps.backspaceEmpty(s.id, fields); return; }
     };
     return (
-      <div key={t.id} className="flex items-center gap-2 py-1.5 group">
-        <button onClick={() => patchRollupItem({ done: !doneFlag })} className="shrink-0">
-          <span className={`flex items-center justify-center w-5 h-5 rounded-md border ${doneFlag ? "bg-teal-500 border-teal-500" : overFlag ? "border-red-300" : "border-stone-300"}`}>{doneFlag && <Check size={13} className="text-white" />}</span>
-        </button>
-        <button title="priority" onClick={() => patchRollupItem({ priority: (lv + 1) % 4 })} className={`shrink-0 ${lv ? PRI_COLOR[lv] : "text-stone-300 hover:text-stone-500"}`}><Flag size={13} fill={lv ? "currentColor" : "none"} /></button>
-        <span className={`min-w-0 flex-1 text-sm truncate ${doneFlag ? "line-through text-stone-400" : overFlag ? "text-red-600" : "text-stone-800"}`}>{t.name || "untitled task"}</span>
-        {tagPills(t)}
-        <Link href={`/app?board=${t.boardId}`} className="shrink-0 text-xs text-stone-400 hover:text-stone-700 border border-stone-200 rounded-full px-2 py-0.5">{t.projectName}</Link>
-        {t.due && <span className={`shrink-0 text-xs ${overFlag ? "text-red-500 font-medium" : "text-stone-500"}`}>{fmtLabel(t.due)}</span>}
+      <div key={t.id} className={t.archived ? "opacity-60" : ""}>
+        <div className="flex items-center gap-2 py-1.5 group">
+          {subs.length ? <span className="text-xs tabular-nums text-stone-400 w-7 text-center shrink-0">{subs.filter((x) => x.done).length}/{subs.length}</span>
+            : <button onClick={() => rollupOps.checkTask(t)} className="shrink-0"><span className={`flex items-center justify-center w-5 h-5 rounded-md border ${done ? "bg-teal-500 border-teal-500" : over ? "border-red-300" : "border-stone-300"}`}>{done && <Check size={13} className="text-white" />}</span></button>}
+          <button title="priority" onClick={() => rollupOps.update(t.id, { priority: (lv + 1) % 4 })} className={`shrink-0 ${lv ? PRI_COLOR[lv] : "text-stone-300 hover:text-stone-500"}`}><Flag size={13} fill={lv ? "currentColor" : "none"} /></button>
+          <div className="min-w-0 flex-1">
+            <textarea ref={reg(t.id)} rows={1} className={`${inp} w-full text-sm resize-none overflow-hidden block ${done ? "line-through text-stone-400" : over ? "text-red-600" : "text-stone-800"}`} value={t.name} placeholder="untitled task" onChange={(e) => { rollupOps.edit(t.id, { name: e.target.value }); autoResize(e.target); }} onKeyDown={onTaskKey} />
+          </div>
+          {rollupTagPills(t)}
+          <button title="notes" onClick={() => toggleDesc(t.id)} className={`shrink-0 ${t.desc ? "text-stone-600" : "opacity-0 group-hover:opacity-100 text-stone-400 hover:text-stone-700"}`}><StickyNote size={13} /></button>
+          <span className="relative inline-flex items-center shrink-0 text-xs cursor-pointer" onClick={(e) => { try { e.currentTarget.querySelector("input")?.showPicker(); } catch {} }}>
+            {t.due ? <span className={over ? "text-red-500 font-medium" : "text-stone-500"}>{fmtLabel(t.due)}</span> : <Calendar size={14} className="text-stone-300 group-hover:text-stone-400" />}
+            <input type="date" tabIndex={-1} value={t.due || ""} onChange={(e) => rollupOps.update(t.id, { due: e.target.value })} className="absolute inset-0 opacity-0 pointer-events-none" />
+          </span>
+          {t.due && <span className="relative inline-flex items-center shrink-0 text-xs cursor-pointer" onClick={(e) => { try { e.currentTarget.querySelector("input")?.showPicker(); } catch {} }}>
+            {t.time ? <span className={over ? "text-red-500 font-medium" : "text-stone-500"}>{fmtTime(t.time)}</span> : <Clock size={13} className="text-stone-300 group-hover:text-stone-400" />}
+            <input type="time" tabIndex={-1} value={t.time || ""} onChange={(e) => rollupOps.update(t.id, { time: e.target.value })} className="absolute inset-0 opacity-0 pointer-events-none" />
+          </span>}
+          <span className="relative shrink-0">
+            <button title="repeat" onClick={() => setRepeatMenu(repeatMenu === t.id ? null : t.id)} className={`flex items-center gap-0.5 ${t.repeat && t.repeat !== "none" ? "text-violet-500" : "text-stone-300 hover:text-stone-500"}`}><Repeat size={14} />{t.repeat && t.repeat !== "none" && <span className="text-xs">{repeatLabel(t)}</span>}</button>
+            {repeatMenu === t.id && (
+              <div className="absolute right-0 top-7 z-20 bg-white border border-stone-200 rounded-lg shadow-lg p-1 w-40 text-sm text-stone-700">
+                {REPEAT_OPTS.map(([v, l]) => <button key={v} onClick={() => { rollupOps.update(t.id, { repeat: v, due: v !== "none" && !t.due ? todayStr : t.due }); setRepeatMenu(null); }} className={`block w-full text-left px-2 py-1 rounded hover:bg-stone-100 ${(t.repeat || "none") === v ? "text-violet-600 font-medium" : ""}`}>{l}</button>)}
+                <div className="flex items-center gap-1 px-2 py-1 border-t border-stone-100 mt-1">
+                  <button onClick={() => { rollupOps.update(t.id, { repeat: "everyN", due: t.due || todayStr }); setRepeatMenu(null); }} className={`${t.repeat === "everyN" ? "text-violet-600 font-medium" : ""}`}>every</button>
+                  <input type="number" min="1" value={t.repeatN || 2} onChange={(e) => rollupOps.update(t.id, { repeat: "everyN", repeatN: Math.max(1, +e.target.value || 1), due: t.due || todayStr })} className="w-12 border border-stone-300 rounded px-1 py-0.5" />
+                  <span>days</span>
+                </div>
+              </div>
+            )}
+          </span>
+          <button title="show on today" onClick={() => rollupOps.toggle(t.id, "today")} className={`shrink-0 ${t.today ? "text-amber-500" : "text-stone-300 hover:text-stone-500"}`}><Sun size={15} /></button>
+          <Link href={`/app?board=${t.boardId}`} className="shrink-0 text-xs text-stone-400 hover:text-stone-700 border border-stone-200 rounded-full px-2 py-0.5">{t.projectName}</Link>
+          <button title="add subtask" onClick={() => rollupOps.addSub(t.id, { boardId: t.boardId, projectName: t.projectName })} className={`${iconBtn} opacity-0 group-hover:opacity-100 shrink-0`}><Plus size={14} /></button>
+          <button title={t.archived ? "unarchive" : "archive"} onClick={() => rollupOps.toggle(t.id, "archived")} className={`${iconBtn} shrink-0 ${t.archived ? "text-stone-600" : "opacity-0 group-hover:opacity-100"}`}><Archive size={13} /></button><button onClick={() => rollupOps.remove(t.id)} className={`${iconBtn} opacity-0 group-hover:opacity-100 shrink-0`}><Trash2 size={13} /></button>
+        </div>
+        {descOpen[t.id] && <div className="pl-9 pb-2"><textarea rows={2} className={noteArea} value={t.desc || ""} placeholder="notes, context, bullet points…" onChange={(e) => rollupOps.edit(t.id, { desc: e.target.value })} /></div>}
+        {subs.map((s) => (
+          <div key={s.id}>
+            <div className="flex items-center gap-2 pl-9 py-0.5 group">
+              <CornerDownRight size={12} className="text-stone-300 shrink-0" />
+              <button onClick={() => rollupOps.toggleSub(s)} className="shrink-0"><span className={`flex items-center justify-center w-3.5 h-3.5 rounded border ${s.done ? "bg-teal-500 border-teal-500" : "border-stone-300"}`}>{s.done && <Check size={10} className="text-white" />}</span></button>
+              <textarea ref={reg(s.id)} rows={1} className={`${inp} flex-1 text-sm min-w-0 resize-none overflow-hidden block ${s.done ? "line-through text-stone-400" : ""}`} value={s.name} placeholder="subtask…" onChange={(e) => { rollupOps.edit(s.id, { name: e.target.value }); autoResize(e.target); }} onKeyDown={(e) => onSubKey(e, s)} />
+              <button title="notes" onClick={() => toggleDesc(s.id)} className={`shrink-0 ${s.desc ? "text-stone-600" : "opacity-0 group-hover:opacity-100 text-stone-400 hover:text-stone-700"}`}><StickyNote size={12} /></button>
+              <button onClick={() => rollupOps.remove(s.id)} className={`${iconBtn} opacity-0 group-hover:opacity-100`}><Trash2 size={11} /></button>
+            </div>
+            {descOpen[s.id] && <div className="pl-16 pb-2"><textarea rows={2} className={noteArea} value={s.desc || ""} placeholder="notes…" onChange={(e) => rollupOps.edit(s.id, { desc: e.target.value })} /></div>}
+          </div>
+        ))}
       </div>
     );
   }
@@ -829,12 +971,9 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
                 <span className="uppercase tracking-wide">group</span>
                 <div className="flex bg-stone-100 rounded-lg p-0.5"><GroupBtn id="none" label="None" /><GroupBtn id="priority" label="Priority" /><GroupBtn id="due" label="Due" /><GroupBtn id="category" label="Category" /></div>
                 <button onClick={() => {
-                  const toArchive = rollupBase.filter((t) => t.done && !t.archived);
-                  if (!toArchive.length) return;
-                  const byBoard = {};
-                  toArchive.forEach((t) => { (byBoard[t.boardId] = byBoard[t.boardId] || []).push({ ...t, archived: true }); });
-                  setRollup((prev) => prev.map((x) => (toArchive.some((t) => t.id === x.id) ? { ...x, archived: true } : x)));
-                  Object.entries(byBoard).forEach(([bId, upserts]) => syncItems(bId, upserts, []).catch(() => {}));
+                  const toArchive = new Set(rollupBase.filter((t) => t.done && !t.archived).map((t) => t.id));
+                  if (!toArchive.size) return;
+                  setRollup((prev) => prev.map((x) => (toArchive.has(x.id) ? { ...x, archived: true } : x)));
                 }} className="flex items-center gap-1 text-stone-500 hover:text-stone-800"><Archive size={13} />archive done</button>
                 <button title="show archived" onClick={() => setShowArchived((v) => !v)} className={`flex items-center gap-1 ${showArchived ? "text-stone-800" : "text-stone-400 hover:text-stone-600"}`}><Eye size={13} />{showArchived ? "hide archived" : "show archived"}</button>
                 {notif !== "granted" && notif !== "unsupported" && <button onClick={() => { try { Notification.requestPermission().then((p) => setNotif(p)); } catch {} }} className="flex items-center gap-1 ml-auto text-stone-500 hover:text-stone-800"><Bell size={13} />enable reminders</button>}
@@ -849,7 +988,7 @@ export default function Hypersymmetry({ initialItems, email, username, bgColor, 
                   {rollupGroups.map((g, gi) => (
                     <div key={gi}>
                       {g.label && <div className="text-xs uppercase tracking-wide text-stone-400 mb-0.5 px-1">{g.label} <span className="text-stone-300">· {g.tasks.length}</span></div>}
-                      <div className="divide-y divide-stone-100">{g.tasks.map((t) => renderAssignedRow(t))}</div>
+                      <div className="divide-y divide-stone-100">{g.tasks.map((t) => renderRollupTaskRow(t, { fields: rollupFields, tops: rollupTops }))}</div>
                     </div>
                   ))}
                 </div>
